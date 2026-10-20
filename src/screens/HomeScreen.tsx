@@ -7,7 +7,7 @@ import { ApprovalModal } from '../components/ApprovalModal';
 import { ItemActionsModal } from '../components/ItemActionsModal';
 import { Timeline } from '../components/Timeline';
 import { type AgendaProposal, planInput } from '../services/agenda';
-import { deleteItem, getItemsByDate, saveItems, updateItemStatus } from '../services/storage';
+import { deleteItem, deleteItems, getItemsByDate, saveItems, updateItemStatus } from '../services/storage';
 import type { CalendarItem } from '../types';
 import { getItemTimeRange, occursOnDate } from '../utils/items';
 import { parseDateString, toDateString } from '../utils/time';
@@ -69,6 +69,9 @@ export function HomeScreen() {
     if (!proposal) return;
     setSaving(true);
     try {
+      if (proposal.deletions.length) {
+        await deleteItems(proposal.deletions.map(({ id }) => id));
+      }
       await saveItems(
         proposedItems.map((item) => (item.status === 'proposed' ? { ...item, status: 'confirmed' } : item)),
       );
@@ -115,7 +118,8 @@ export function HomeScreen() {
   // While the modal is open, the proposal for this day is previewed in the timeline
   const timelineItems = useMemo(() => {
     if (!proposal) return items;
-    const changedIds = new Set(proposedItems.map((item) => item.id));
+    // Changed and deleted items are replaced by their preview, or hidden
+    const changedIds = new Set([...proposedItems, ...proposal.deletions].map((item) => item.id));
     const previews = proposedItems.filter((item) => occursOnDate(item, date));
     return [...items.filter((item) => !changedIds.has(item.id)), ...previews];
   }, [items, proposal, proposedItems, date]);
@@ -198,6 +202,8 @@ export function HomeScreen() {
         cascade={proposal?.cascade}
         cascadeAccepted={cascadeAccepted}
         onToggleCascade={() => setCascadeAccepted((accepted) => !accepted)}
+        deletions={proposal?.deletions}
+        clearAll={proposal?.clearAll}
         saving={saving}
         onAccept={handleAccept}
         onCancel={() => setProposal(null)}

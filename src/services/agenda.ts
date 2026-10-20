@@ -9,16 +9,7 @@ import {
   timeToMinutes,
   toDateString,
 } from '../utils/time';
-import {
-  type Intent,
-  type IntentResult,
-  type ParseResult,
-  type TaskReference,
-  isSameTask,
-  matchTaskWords,
-  parseInputToTasks,
-  parseIntent,
-} from './nlp';
+import { type ParsedAction, type UpdateReason, parseUserInput } from './nlp';
 import { alignToGrid, fitFlexibleTasks, reflowDay } from './scheduler';
 import { getItemsByDate } from './storage';
 
@@ -47,7 +38,6 @@ export interface CascadeProposal {
 }
 
 export interface AgendaProposal {
-  intent: Intent;
   rawText: string;
   /** Items saved on approval; status 'proposed' becomes 'confirmed' */
   items: CalendarItem[];
@@ -56,14 +46,28 @@ export interface AgendaProposal {
   /** How the existing agenda changes; items not listed here are new */
   changes: AgendaChange[];
   cascade?: CascadeProposal;
+  /** Items deleted on approval */
+  deletions: CalendarItem[];
+  /** The whole day is emptied: the user must confirm it */
+  clearAll: boolean;
   /** Extra information for the user */
   notice?: string;
 }
 
 export type PlanResult = { proposal: AgendaProposal } | { error: string };
 
-type ExtendIntent = Extract<IntentResult, { intent: 'EXTEND_TASK' }>;
-type DelayIntent = Extract<IntentResult, { intent: 'RESCHEDULE_DELAY' }>;
+type UpdateAction = Extract<ParsedAction, { action: 'UPDATE' }>;
+type ShiftAllAction = Extract<ParsedAction, { action: 'SHIFT_ALL' }>;
+type CreateAction = Extract<ParsedAction, { action: 'CREATE' }>;
+
+const CHANGE_KINDS: Record<UpdateReason, AgendaChangeKind> = {
+  extend: 'extended',
+  delay: 'moved',
+  statement: 'updated',
+};
+
+/** A fixed event or a flexible task with no known length */
+const DEFAULT_DURATION_MINUTES = 60;
 
 const CHANGE_VERBS: Partial<Record<AgendaChangeKind, string>> = {
   moved: 'Lo spostamento di',
@@ -102,36 +106,11 @@ function withFlexibleTimes(item: CalendarItem, dateString: string, start: number
 }
 
 /**
- * The task the user refers to: best word match with the title, then same category.
- * Without a reference: the task in progress now, or the next one.
- * Ties go to the task closest to now.
- */
-function findTarget(items: CalendarItem[], reference: TaskReference | null, now: Date): CalendarItem | null {
-  const candidates = items.filter((item) => item.status !== 'completed' && getItemTimeRange(item));
-  const distanceFromNow = (item: CalendarItem) => {
-    const range = getItemTimeRange(item)!;
-    const start = new Date(range.start).getTime();
-    const end = new Date(range.end).getTime();
-    return start <= now.getTime() && now.getTime() < end ? 0 : Math.abs(start - now.getTime());
-  };
-
-  const scored = candidates.map((item) => {
-    if (!reference) return { item, score: 1 };
-    const { matched } = matchTaskWords(reference.query, item.title);
-    return { item, score: matched + (reference.category === item.category ? 0.5 : 0) };
-  });
-
-  const best = scored
-    .filter(({ score }) => score > 0)
-    .sort((a, b) => b.score - a.score || distanceFromNow(a.item) - distanceFromNow(b.item))[0];
-  return best?.item ?? null;
-}
-
-/**
  * Gives a flexible task its new times. It stays at its current start if that respects its window
  * (a longer task keeps its start); otherwise it takes the first free time in its window.
- * If its window has no free time, it goes at the start of the window anyway: the cascade then
- * offers to move what it overlaps.
+ * If its window has no free time, it takes the first time clear of what can't move (fixed events,
+ * tasks started), and the cascade offers to move the flexible tasks it overlaps; failing that,
+ * the start of the window.
  */
 function placeFlexible(item: CalendarItem, others: CalendarItem[], dateString: string, now: Date): CalendarItem {
   const range = getItemTimeRange(item);
@@ -152,6 +131,16 @@ function placeFlexible(item: CalendarItem, others: CalendarItem[], dateString: s
   });
   if (scheduled.length) {
     return { ...scheduled[0], status: item.status };
+  }
+  const anchors = others.filter(
+    (other) => other.type === 'fixed' || other.status === 'in_progress' || other.status === 'completed',
+  );
+  const clearOfAnchors = fitFlexibleTasks(anchors, [{ ...item, estimatedMinutes: duration }], dateString, {
+    intervalMinutes: SCHEDULER_INTERVAL_MINUTES,
+    earliestStartTime,
+  }).scheduled[0];
+  if (clearOfAnchors) {
+    return { ...clearOfAnchors, status: item.status };
   }
   const fallback = alignToGrid(
     Math.max(minStart, earliest, timeToMinutes(DAY_START)),
@@ -265,100 +254,145 @@ function computeCascade(
   return { message, changes, items: changes.map(({ item }) => item) };
 }
 
-/** A proposal made of requested changes, new items and the cascade they may need. */
+/** A proposal made of requested changes, new items, deletions and the cascade they may need. */
 function buildProposal(
-  parsed: { intent: Intent; rawText: string },
+  rawText: string,
   dateString: string,
   dayItems: CalendarItem[],
   primaries: AgendaChange[],
   now: Date,
-  extras: { newItems?: CalendarItem[]; unscheduled?: CalendarItem[]; notices?: string[] } = {},
+  extras: { newItems?: CalendarItem[]; unscheduled?: CalendarItem[]; deletions?: CalendarItem[]; notices?: string[] } = {},
 ): AgendaProposal {
-  const { newItems = [], unscheduled = [], notices = [] } = extras;
-  const originals = new Map(dayItems.map((item) => [item.id, item]));
+  const { newItems = [], unscheduled = [], deletions = [], notices = [] } = extras;
+  const remaining = dayItems.filter((item) => !deletions.some(({ id }) => id === item.id));
+  const originals = new Map(remaining.map((item) => [item.id, item]));
   const changes = primaries.map((change) => ({ ...change, item: asPreview(change.item, originals.get(change.item.id)) }));
   const todayNew = newItems.filter((item) => getItemTimeRange(item)?.start.startsWith(dateString));
 
-  if (!changes.length && !newItems.length && !notices.length) {
+  if (!changes.length && !newItems.length && !deletions.length && !notices.length) {
     notices.push("Nessuna modifica necessaria: l'agenda è già compatibile.");
   }
   return {
-    intent: parsed.intent,
-    rawText: parsed.rawText,
+    rawText,
     items: [...changes.map(({ item }) => item), ...newItems].sort(compareByStartTime),
     unscheduled,
     changes,
-    cascade: computeCascade(dayItems, changes, dateString, now, todayNew),
+    cascade: computeCascade(remaining, changes, dateString, now, todayNew),
+    deletions,
+    clearAll: false,
     notice: notices.join(' ') || undefined,
   };
 }
 
 /**
- * Applies a parsed task to the existing task it duplicates: new times, window or duration.
- * Returns null when the text adds nothing to the existing task.
+ * The existing task with the changes the user asked for: a longer duration, a new time,
+ * a delay (new earliest start), or new details (window, duration).
+ * Returns a message instead when nothing changes.
  */
-function updateExistingTask(
-  existing: CalendarItem,
-  draft: CalendarItem,
-  explicitDuration: boolean,
-  others: CalendarItem[],
+function applyUpdate(
+  update: UpdateAction,
+  target: CalendarItem,
+  dayItems: CalendarItem[],
   dateString: string,
   now: Date,
-): CalendarItem | null {
-  const range = getItemTimeRange(existing);
-  const currentStart = range ? minutesFromDayStart(range.start, dateString) : null;
-  const currentDuration = range && currentStart !== null ? minutesFromDayStart(range.end, dateString) - currentStart : null;
+): AgendaChange | string {
+  const others = dayItems.filter((item) => item.id !== target.id);
+  const range = getItemTimeRange(target);
+  const start = range ? minutesFromDayStart(range.start, dateString) : null;
+  const end = range ? minutesFromDayStart(range.end, dateString) : null;
+  const currentDuration = start !== null && end !== null ? end - start : (target.estimatedMinutes ?? DEFAULT_DURATION_MINUTES);
+  const isFixed = target.type === 'fixed' && start !== null;
+  const withFixedTimes = (newStart: number, duration: number): CalendarItem => ({
+    ...target,
+    fixedStartTime: combineDateAndMinutes(dateString, newStart),
+    fixedEndTime: combineDateAndMinutes(dateString, newStart + duration),
+  });
+  /** "tra le 14/14:30": the task must start by then, so it ends by then plus its duration */
+  const maxEndFor = (duration: number) =>
+    update.maxEndTime ??
+    (update.latestStartTime ? minutesToTime(timeToMinutes(update.latestStartTime) + duration) : target.maxEndTime);
 
-  if (draft.type === 'fixed' && draft.fixedStartTime && draft.fixedEndTime) {
-    // An explicit time: the existing task takes it
-    if (existing.type === 'fixed') {
-      return { ...existing, fixedStartTime: draft.fixedStartTime, fixedEndTime: draft.fixedEndTime };
+  if (update.extraMinutes) {
+    if (!range) return `'${target.title}' non ha ancora un orario da allungare.`;
+    const extended: CalendarItem =
+      target.type === 'fixed'
+        ? { ...target, fixedEndTime: addMinutesToISO(range.end, update.extraMinutes) }
+        : {
+            ...target,
+            estimatedMinutes: currentDuration + update.extraMinutes,
+            proposedEndTime: addMinutesToISO(range.end, update.extraMinutes),
+          };
+    return { kind: 'extended', item: extended, minutes: update.extraMinutes };
+  }
+
+  let updated: CalendarItem;
+  if (update.newStartTime) {
+    // An explicit time: the task takes it
+    const newStart = timeToMinutes(update.newStartTime);
+    const duration = update.newEndTime
+      ? timeToMinutes(update.newEndTime) - newStart
+      : (update.newDuration ?? currentDuration);
+    updated = target.type === 'fixed' ? withFixedTimes(newStart, duration) : withFlexibleTimes(target, dateString, newStart, duration);
+  } else if (update.reason === 'delay') {
+    // A fixed event moves exactly; a flexible task gets a new earliest start and is re-placed
+    const newStart = update.minStartTime
+      ? timeToMinutes(update.minStartTime)
+      : (start ?? 0) + (update.delayMinutes ?? 0);
+    updated = isFixed
+      ? withFixedTimes(newStart, currentDuration)
+      : placeFlexible(
+          { ...target, minStartTime: minutesToTime(newStart), maxEndTime: maxEndFor(currentDuration) },
+          others,
+          dateString,
+          now,
+        );
+  } else {
+    if (!update.minStartTime && !update.maxEndTime && !update.latestStartTime && !update.newDuration) {
+      return `'${target.title}' è già in agenda: non creo un duplicato.`;
     }
-    const start = minutesFromDayStart(draft.fixedStartTime, dateString);
-    return withFlexibleTimes(existing, dateString, start, minutesFromDayStart(draft.fixedEndTime, dateString) - start);
+    const duration = update.newDuration ?? currentDuration;
+    const placed = placeFlexible(
+      {
+        ...target,
+        // Placed as a flexible task from its current times
+        type: 'flexible',
+        proposedStartTime: range?.start,
+        proposedEndTime: range?.end,
+        estimatedMinutes: duration,
+        minStartTime: update.minStartTime ?? target.minStartTime,
+        maxEndTime: maxEndFor(duration),
+      },
+      others,
+      dateString,
+      now,
+    );
+    // A fixed event takes the time chosen in its window but stays fixed
+    updated = isFixed
+      ? withFixedTimes(minutesFromDayStart(getItemTimeRange(placed)!.start, dateString), duration)
+      : placed;
   }
 
-  if (!draft.minStartTime && !draft.maxEndTime && !explicitDuration) {
-    return null;
+  if (isSameTime(updated, target)) {
+    return update.reason === 'delay'
+      ? `'${target.title}' è già dopo le ${update.minStartTime ?? 'ora indicata'}: nessuno spostamento.`
+      : `'${target.title}' è già in agenda con questi orari.`;
   }
-  const duration = explicitDuration ? draft.estimatedMinutes : (existing.estimatedMinutes ?? currentDuration ?? undefined);
-
-  if (existing.type === 'fixed' && currentStart !== null && currentDuration !== null) {
-    const minStart = draft.minStartTime ? timeToMinutes(draft.minStartTime) : currentStart;
-    const start = Math.max(currentStart, minStart);
-    const end = start + (duration ?? currentDuration);
-    return {
-      ...existing,
-      fixedStartTime: combineDateAndMinutes(dateString, start),
-      fixedEndTime: combineDateAndMinutes(dateString, end),
-    };
-  }
-  return placeFlexible(
-    {
-      ...existing,
-      estimatedMinutes: duration,
-      minStartTime: draft.minStartTime ?? existing.minStartTime,
-      maxEndTime: draft.maxEndTime ?? existing.maxEndTime,
-    },
-    others,
-    dateString,
-    now,
-  );
+  return { kind: CHANGE_KINDS[update.reason], item: updated };
 }
 
-async function planCreate(
-  parsed: ParseResult & { intent: Intent },
+/** New tasks placed in their day: fixed events as said, flexible tasks in the first free time. */
+async function planNewTasks(
+  creates: CreateAction[],
   dateString: string,
   dayItems: CalendarItem[],
   now: Date,
-  notices: string[] = [],
-): Promise<AgendaProposal> {
+): Promise<{ newItems: CalendarItem[]; unscheduled: CalendarItem[] }> {
   const createdAt = now.toISOString();
-  const drafts: CalendarItem[] = parsed.items.map((draft) => ({
+  const drafts: CalendarItem[] = creates.map(({ task }) => ({
     title: 'Nuovo impegno',
     type: 'flexible',
     category: 'personal',
-    ...draft,
+    ...task,
     id: generateId(),
     status: 'proposed',
     createdAt,
@@ -367,78 +401,34 @@ async function planCreate(
   const getDraftDate = (item: CalendarItem) =>
     item.type === 'fixed' && item.fixedStartTime ? item.fixedStartTime.slice(0, 10) : (item.scheduledDate ?? dateString);
 
-  // A task already in today's agenda is updated instead of duplicated
-  const primaries: AgendaChange[] = [];
-  const newDrafts: CalendarItem[] = [];
-  drafts.forEach((draft, index) => {
-    const existing =
-      getDraftDate(draft) === dateString
-        ? dayItems.find((item) => item.status !== 'completed' && isSameTask(draft.title, item.title))
-        : undefined;
-    if (!existing) {
-      newDrafts.push(draft);
-      return;
-    }
-    const others = dayItems.filter((item) => item.id !== existing.id);
-    const updated = updateExistingTask(existing, draft, parsed.explicitDuration[index], others, dateString, now);
-    if (updated) {
-      primaries.push({ kind: 'updated', item: updated });
-    } else {
-      notices.push(`'${existing.title}' è già in agenda: non creo un duplicato.`);
-    }
-  });
-
-  const updatedById = new Map(primaries.map(({ item }) => [item.id, item]));
-  const today = dayItems.map((item) => updatedById.get(item.id) ?? item);
-  const proposed: CalendarItem[] = [];
+  const newItems: CalendarItem[] = [];
   const unscheduled: CalendarItem[] = [];
-  for (const draftDate of new Set(newDrafts.map(getDraftDate))) {
-    const dayDrafts = newDrafts.filter((draft) => getDraftDate(draft) === draftDate);
+  for (const draftDate of new Set(drafts.map(getDraftDate))) {
+    const dayDrafts = drafts.filter((draft) => getDraftDate(draft) === draftDate);
     const fixed = dayDrafts.filter((draft) => draft.type === 'fixed');
-    const existing = draftDate === dateString ? today : await getItemsByDate(draftDate);
+    const existing = draftDate === dateString ? dayItems : await getItemsByDate(draftDate);
     const result = fitFlexibleTasks(
       [...existing, ...fixed],
       dayDrafts.filter((draft) => draft.type === 'flexible'),
       draftDate,
       { intervalMinutes: SCHEDULER_INTERVAL_MINUTES, earliestStartTime: getEarliestStart(draftDate, now) },
     );
-    proposed.push(...fixed, ...result.scheduled);
+    newItems.push(...fixed, ...result.scheduled);
     unscheduled.push(...result.unscheduled);
   }
-
-  return buildProposal(parsed, dateString, dayItems, primaries, now, { newItems: proposed, unscheduled, notices });
-}
-
-function planExtend(parsed: ExtendIntent, dateString: string, dayItems: CalendarItem[], now: Date): PlanResult {
-  const target = findTarget(dayItems, parsed.target, now);
-  if (!target) {
-    return {
-      error: parsed.target
-        ? `Non ho trovato "${parsed.target.query}" nell'agenda di oggi.`
-        : "Non ho trovato un'attività in corso da allungare.",
-    };
-  }
-  const range = getItemTimeRange(target)!;
-  const extended: CalendarItem =
-    target.type === 'fixed'
-      ? { ...target, fixedEndTime: addMinutesToISO(range.end, parsed.extraMinutes) }
-      : {
-          ...target,
-          estimatedMinutes:
-            minutesFromDayStart(range.end, dateString) - minutesFromDayStart(range.start, dateString) + parsed.extraMinutes,
-          proposedEndTime: addMinutesToISO(range.end, parsed.extraMinutes),
-        };
-  return {
-    proposal: buildProposal(parsed, dateString, dayItems, [
-      { kind: 'extended', item: extended, minutes: parsed.extraMinutes },
-    ], now),
-  };
+  return { newItems, unscheduled };
 }
 
 /** "non arrivo prima delle 14:30" with no task named: everything not started before that time moves after it. */
-function planDelayAll(parsed: DelayIntent, dateString: string, dayItems: CalendarItem[], now: Date): AgendaProposal {
+function planShiftAll(
+  shift: ShiftAllAction,
+  rawText: string,
+  dateString: string,
+  dayItems: CalendarItem[],
+  now: Date,
+): AgendaProposal {
   const nowMinutes = dateString === toDateString(now) ? now.getHours() * 60 + now.getMinutes() : 0;
-  const minStart = parsed.minStartTime ? timeToMinutes(parsed.minStartTime) : nowMinutes + (parsed.delayMinutes ?? 0);
+  const minStart = shift.minStartTime ? timeToMinutes(shift.minStartTime) : nowMinutes + (shift.delayMinutes ?? 0);
   const affected = dayItems.filter((item) => {
     const range = getItemTimeRange(item);
     if (!range || item.status === 'completed' || item.status === 'in_progress') return false;
@@ -474,78 +464,26 @@ function planDelayAll(parsed: DelayIntent, dateString: string, dayItems: Calenda
   }
 
   return {
-    intent: parsed.intent,
-    rawText: parsed.rawText,
+    rawText,
     items: [...toSave.values()].sort(compareByStartTime),
     unscheduled: [],
     changes: changes.sort((a, b) => compareByStartTime(a.item, b.item)),
+    deletions: [],
+    clearAll: false,
     notice: affected.length ? undefined : `Nessuna attività da spostare prima delle ${minutesToTime(minStart)}.`,
   };
 }
 
-async function planDelay(
-  parsed: DelayIntent,
-  dateString: string,
-  dayItems: CalendarItem[],
-  now: Date,
-): Promise<PlanResult> {
-  if (!parsed.target) {
-    return { proposal: planDelayAll(parsed, dateString, dayItems, now) };
-  }
-
-  const target = findTarget(dayItems, parsed.target, now);
-  if (!target) {
-    // "non penso di riuscire a mangiare alle 13:30" with no meal planned: it's a new task
-    if (parsed.negated) {
-      const notice = `Non ho trovato '${parsed.target.query}' in agenda: lo aggiungo come nuovo impegno.`;
-      const created = parseInputToTasks(parsed.rawText, dateString);
-      return { proposal: await planCreate({ ...created, intent: 'CREATE_TASK' }, dateString, dayItems, now, [notice]) };
-    }
-    return { error: `Non ho trovato "${parsed.target.query}" nell'agenda di oggi.` };
-  }
-
-  const range = getItemTimeRange(target)!;
-  const start = minutesFromDayStart(range.start, dateString);
-  const end = minutesFromDayStart(range.end, dateString);
-  const newStart = parsed.minStartTime ? timeToMinutes(parsed.minStartTime) : start + (parsed.delayMinutes ?? 0);
-  const others = dayItems.filter((item) => item.id !== target.id);
-
-  // A fixed event moves exactly; a flexible task gets a new window and is re-placed
-  const updated: CalendarItem =
-    target.type === 'fixed'
-      ? {
-          ...target,
-          fixedStartTime: combineDateAndMinutes(dateString, newStart),
-          fixedEndTime: combineDateAndMinutes(dateString, newStart + end - start),
-        }
-      : placeFlexible(
-          {
-            ...target,
-            minStartTime: minutesToTime(newStart),
-            maxEndTime:
-              parsed.maxEndTime ??
-              (parsed.latestStartTime
-                ? minutesToTime(timeToMinutes(parsed.latestStartTime) + (target.estimatedMinutes ?? end - start))
-                : target.maxEndTime),
-          },
-          others,
-          dateString,
-          now,
-        );
-
-  const primaries: AgendaChange[] = isSameTime(updated, target) ? [] : [{ kind: 'moved', item: updated }];
-  return {
-    proposal: buildProposal(parsed, dateString, dayItems, primaries, now, {
-      notices: primaries.length ? [] : [`'${target.title}' è già dopo le ${minutesToTime(newStart)}: nessuno spostamento.`],
-    }),
-  };
+function notFoundMessage(query: string): string {
+  return query
+    ? `Non ho trovato "${query}" nell'agenda di oggi.`
+    : "Non ho trovato un'attività in corso da modificare.";
 }
 
 /**
- * Turns the user's text into a proposal for the agenda of `dateString`:
- * new tasks (or updates of the same task already planned), a longer task, or a delay.
- * Shifts of the following events are offered separately, in `cascade`.
- * `dayItems` are the items already saved for that day.
+ * Turns the user's text into a proposal for the agenda of `dateString`, interpreting it against
+ * the items already saved for that day (`dayItems`): new tasks, changes to existing ones,
+ * deletions, or emptying the day. Shifts of the following events are offered separately, in `cascade`.
  */
 export async function planInput(
   text: string,
@@ -553,13 +491,70 @@ export async function planInput(
   dayItems: CalendarItem[],
   now = new Date(),
 ): Promise<PlanResult> {
-  const parsed = parseIntent(text, dateString);
-  switch (parsed.intent) {
-    case 'CREATE_TASK':
-      return { proposal: await planCreate(parsed, dateString, dayItems, now) };
-    case 'EXTEND_TASK':
-      return planExtend(parsed, dateString, dayItems, now);
-    case 'RESCHEDULE_DELAY':
-      return planDelay(parsed, dateString, dayItems, now);
+  const { rawText, actions } = parseUserInput(text, dayItems, { date: dateString, now });
+  if (!actions.length) {
+    return { error: 'Non ho capito cosa aggiungere o modificare.' };
   }
+
+  if (actions.some(({ action }) => action === 'CLEAR_ALL')) {
+    return {
+      proposal: {
+        rawText,
+        items: [],
+        unscheduled: [],
+        changes: [],
+        deletions: dayItems,
+        clearAll: true,
+        notice: dayItems.length ? undefined : 'Non ci sono impegni da eliminare oggi.',
+      },
+    };
+  }
+
+  const shift = actions.find((action): action is ShiftAllAction => action.action === 'SHIFT_ALL');
+  if (shift) {
+    return { proposal: planShiftAll(shift, rawText, dateString, dayItems, now) };
+  }
+
+  const notices: string[] = [];
+  const deletions: CalendarItem[] = [];
+  const primaries: AgendaChange[] = [];
+  const creates: CreateAction[] = [];
+  // Later changes see the earlier ones
+  let working = [...dayItems];
+
+  for (const action of actions) {
+    if (action.action === 'UNRESOLVED') {
+      notices.push(notFoundMessage(action.query));
+    } else if (action.action === 'DELETE') {
+      deletions.push(...dayItems.filter(({ id }) => action.targetTaskIds.includes(id)));
+    } else if (action.action === 'CREATE') {
+      creates.push(action);
+    } else if (action.action === 'UPDATE') {
+      const target = working.find(({ id }) => id === action.targetTaskId);
+      if (!target) continue;
+      const result = applyUpdate(action, target, working, dateString, now);
+      if (typeof result === 'string') {
+        notices.push(result);
+      } else {
+        primaries.push(result);
+        working = working.map((item) => (item.id === result.item.id ? result.item : item));
+      }
+    }
+  }
+
+  // Only unresolved references: nothing to propose
+  if (notices.length === actions.length && actions.every(({ action }) => action === 'UNRESOLVED')) {
+    return { error: notices.join(' ') };
+  }
+
+  const remaining = working.filter((item) => !deletions.some(({ id }) => id === item.id));
+  const { newItems, unscheduled } = await planNewTasks(creates, dateString, remaining, now);
+  return {
+    proposal: buildProposal(rawText, dateString, dayItems, primaries, now, {
+      newItems,
+      unscheduled,
+      deletions,
+      notices,
+    }),
+  };
 }

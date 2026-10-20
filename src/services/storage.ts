@@ -91,3 +91,11 @@ export function deleteItem(id: string): Promise<boolean> {
 export function clearAllItems(): Promise<void> {
   return enqueueWrite(() => AsyncStorage.removeItem(STORAGE_KEY));
 }
+
+/** Deletes the items with these ids, in one write. */
+export function deleteItems(ids: string[]): Promise<void> {
+  return enqueueWrite(async () => {
+    const items = await readItems();
+    await writeItems(items.filter((item) => !ids.includes(item.id)));
+  });
+}

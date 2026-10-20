@@ -1,4 +1,4 @@
-import { ArrowRightLeft, Clock, Info, Sparkles, Square, SquareCheck, TriangleAlert } from 'lucide-react-native';
+import { ArrowRightLeft, Clock, Info, Sparkles, Square, SquareCheck, Trash, TriangleAlert } from 'lucide-react-native';
 import { ActivityIndicator, Modal, Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -23,6 +23,10 @@ interface ApprovalModalProps {
   cascade?: CascadeProposal;
   cascadeAccepted?: boolean;
   onToggleCascade?: () => void;
+  /** Items deleted on approval */
+  deletions?: CalendarItem[];
+  /** Emptying the whole day: the modal becomes a confirmation */
+  clearAll?: boolean;
   saving?: boolean;
   onAccept: () => void;
   onCancel: () => void;
@@ -130,6 +134,32 @@ function ChangeRow({ change }: { change: AgendaChange }) {
   );
 }
 
+function DeletionList({ items, clearAll }: { items: CalendarItem[]; clearAll: boolean }) {
+  return (
+    <View className="mb-2 rounded-2xl border border-red-200 bg-red-50 p-3">
+      <View className="mb-1 flex-row items-start gap-2">
+        <Trash color="#dc2626" size={16} />
+        <Text className="flex-1 text-sm font-semibold text-red-800">
+          {clearAll
+            ? `Verranno eliminati tutti gli impegni di oggi (${items.length}). L'operazione non si può annullare.`
+            : items.length === 1
+              ? 'Questo impegno verrà eliminato:'
+              : `Questi ${items.length} impegni verranno eliminati:`}
+        </Text>
+      </View>
+      {items.map((item) => {
+        const range = getItemTimeRange(item);
+        return (
+          <Text key={item.id} className="ml-6 text-sm text-red-900">
+            • {item.title}
+            {range ? ` (${formatTimeOfDay(range.start)} – ${formatTimeOfDay(range.end)})` : ''}
+          </Text>
+        );
+      })}
+    </View>
+  );
+}
+
 export function ApprovalModal({
   visible,
   rawText,
@@ -140,12 +170,25 @@ export function ApprovalModal({
   cascade,
   cascadeAccepted = false,
   onToggleCascade,
+  deletions = [],
+  clearAll = false,
   saving = false,
   onAccept,
   onCancel,
 }: ApprovalModalProps) {
   const insets = useSafeAreaInsets();
-  const canAccept = items.length > 0 && !saving;
+  const canAccept = (items.length > 0 || deletions.length > 0) && !saving;
+  // Only deletions: the accept button deletes
+  const isDeletion = deletions.length > 0 && items.length === 0;
+  const title = clearAll
+    ? 'Svuotare la giornata?'
+    : isDeletion
+      ? deletions.length === 1
+        ? "Eliminare l'impegno?"
+        : 'Eliminare gli impegni?'
+      : changes.length
+        ? 'Riorganizzazione agenda'
+        : "Proposta dell'agenda";
   const changedIds = new Set(changes.map(({ item }) => item.id));
   const newItems = items.filter((item) => !changedIds.has(item.id));
 
@@ -155,10 +198,8 @@ export function ApprovalModal({
         <Pressable className="flex-1" onPress={onCancel} disabled={saving} />
         <View className="rounded-t-3xl bg-white px-5 pt-5" style={{ paddingBottom: insets.bottom + 16 }}>
           <View className="mb-4 flex-row items-center gap-2">
-            <Sparkles color="#4f46e5" size={20} />
-            <Text className="text-lg font-bold text-slate-900">
-              {changes.length ? 'Riorganizzazione agenda' : "Proposta dell'agenda"}
-            </Text>
+            {isDeletion ? <Trash color="#dc2626" size={20} /> : <Sparkles color="#4f46e5" size={20} />}
+            <Text className="text-lg font-bold text-slate-900">{title}</Text>
           </View>
 
           <Text className="mb-1 text-xs font-semibold uppercase text-slate-400">Hai scritto</Text>
@@ -173,6 +214,7 @@ export function ApprovalModal({
                 <Text className="flex-1 text-sm text-slate-700">{notice}</Text>
               </View>
             )}
+            {deletions.length > 0 && <DeletionList items={deletions} clearAll={clearAll} />}
             {changes.map((change) => (
               <ChangeRow key={`${change.kind}-${change.item.id}`} change={change} />
             ))}
@@ -210,12 +252,22 @@ export function ApprovalModal({
             <Pressable
               onPress={onAccept}
               disabled={!canAccept}
-              className={`flex-1 items-center rounded-2xl py-3.5 ${canAccept ? 'bg-indigo-600 active:bg-indigo-700' : 'bg-indigo-300'}`}
+              className={`flex-1 items-center rounded-2xl py-3.5 ${
+                isDeletion
+                  ? canAccept
+                    ? 'bg-red-600 active:bg-red-700'
+                    : 'bg-red-300'
+                  : canAccept
+                    ? 'bg-indigo-600 active:bg-indigo-700'
+                    : 'bg-indigo-300'
+              }`}
             >
               {saving ? (
                 <ActivityIndicator color="#ffffff" />
               ) : (
-                <Text className="font-semibold text-white">Accetta e Salva</Text>
+                <Text className="font-semibold text-white">
+                  {clearAll ? 'Elimina tutto' : isDeletion ? 'Elimina' : 'Accetta e Salva'}
+                </Text>
               )}
             </Pressable>
           </View>

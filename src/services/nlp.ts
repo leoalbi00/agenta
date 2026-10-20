@@ -1,47 +1,65 @@
 import type { CalendarItem, TaskCategory } from '../types';
-import { addDays, combineDateAndMinutes, minutesToTime, parseDateString, toDateString } from '../utils/time';
+import { getItemTimeRange } from '../utils/items';
+import { combineDateAndMinutes, minutesToTime, toDateString } from '../utils/time';
+import {
+  type Cues,
+  FUNCTION_WORDS,
+  LEADING_MOTION_VERBS,
+  WHOLE_DAY_WORDS,
+  detectCues,
+  findCategory,
+  hasClitic,
+  isMealOrTravel,
+  tokenize,
+} from './language/lexicon';
+import { type ConceptBag, conceptBag, isMatch, matchScore, similarity, totalWeight } from './language/similarity';
+import { CONTEXT_PATTERNS, type Span, type TimeSlots, type TimeWindow, findTimeSlots } from './language/timeExpressions';
+
+/** New times, duration or window for an existing task ("HH:mm" times) */
+export interface TaskChanges {
+  /** "sposta la riunione alle 16", "mangiare alle 14" */
+  newStartTime?: string;
+  /** With a range ("dalle 10 alle 11") */
+  newEndTime?: string;
+  /** "mangiare per un'ora" */
+  newDuration?: number;
+  /** "ci metto più tempo" */
+  extraMinutes?: number;
+  /** "posticipa di 30 minuti" */
+  delayMinutes?: number;
+  /** "non riesco prima delle 14" */
+  minStartTime?: string;
+  /** "tra le 14/14:30" */
+  latestStartTime?: string;
+  /** "tra le 15 e le 17" */
+  maxEndTime?: string;
+}
+
+/** Why an existing task changes: a longer task, a delay, or the task restated with new details */
+export type UpdateReason = 'extend' | 'delay' | 'statement';
+
+export type ParsedAction =
+  /** "elimina tutti gli impegni", "cancella la giornata", "reset" */
+  | { action: 'CLEAR_ALL' }
+  /** "elimina la palestra", "cancella tutte le riunioni" */
+  | { action: 'DELETE'; targetTaskIds: string[] }
+  | ({ action: 'UPDATE'; reason: UpdateReason; targetTaskId: string; targetTitle: string } & TaskChanges)
+  /** "non arrivo prima delle 14:30": everything not started yet moves after that time */
+  | { action: 'SHIFT_ALL'; minStartTime?: string; delayMinutes?: number }
+  | { action: 'CREATE'; task: Partial<CalendarItem>; explicitDuration: boolean }
+  /** The text refers to a task that isn't in the agenda (or there's no task to refer to) */
+  | { action: 'UNRESOLVED'; query: string };
 
 export interface ParseResult {
-  items: Partial<CalendarItem>[];
-  /** Per item: true if the duration was written ("per 2 ore"), false if it's a default */
-  explicitDuration: boolean[];
   rawText: string;
+  actions: ParsedAction[];
 }
 
-export type Intent = 'CREATE_TASK' | 'EXTEND_TASK' | 'RESCHEDULE_DELAY';
-
-/** How the user refers to an existing task ("la spesa", "lo studio") */
-export interface TaskReference {
-  query: string;
-  /** Category implied by the words, if any ("palestra" -> health) */
-  category?: TaskCategory;
+export interface ParseOptions {
+  /** "YYYY-MM-DD" of the agenda `currentTasks` belong to; relative days ("domani") count from it */
+  date?: string;
+  now?: Date;
 }
-
-export type IntentResult =
-  | ({ intent: 'CREATE_TASK' } & ParseResult)
-  | {
-      intent: 'EXTEND_TASK';
-      /** null: the task in progress */
-      target: TaskReference | null;
-      extraMinutes: number;
-      rawText: string;
-    }
-  | {
-      intent: 'RESCHEDULE_DELAY';
-      /** null: all the following activities */
-      target: TaskReference | null;
-      /** "HH:mm" the target can't start before ("non arrivo prima delle 14:30") */
-      minStartTime?: string;
-      /** "HH:mm" the target should start by ("tra le 14/14:30" -> 14:30) */
-      latestStartTime?: string;
-      /** "HH:mm" the target must end by ("tra le 14 e le 16") */
-      maxEndTime?: string;
-      /** Relative delay when no time is given ("posticipa di 30 minuti") */
-      delayMinutes?: number;
-      /** Said as "non riesco / non penso di riuscire...", which can also describe a new task */
-      negated: boolean;
-      rawText: string;
-    };
 
 /** Duration of a fixed event when only the start time is given ("alle 15") */
 const DEFAULT_FIXED_MINUTES = 60;
@@ -67,669 +85,397 @@ const DEFAULT_DELAY_MINUTES = 30;
 /** "non riesco alle 13:30": the new slot starts at least this long after the excluded time */
 const EXCLUDED_TIME_OFFSET_MINUTES = 15;
 
-/** Words that don't identify a task ("andare a parlare con Riccardo" vs "andare in palestra") */
-const GENERIC_STEMS = new Set([
-  'fare', 'andar', 'devo', 'dover', 'penso', 'riusc', 'prima', 'dopo', 'oggi', 'doman', 'tempo', 'magar',
-  'con', 'per', 'una', 'uno', 'gli', 'del', 'dal', 'nel', 'sul', 'all', 'alla', 'alle', 'dell', 'della', 'delle', 'degli',
-]);
+/** Below this weight a clause doesn't name a task on its own ("andarci", "vado") */
+const MIN_CONTENT_WEIGHT = 0.5;
 
-/** Stems that name the same activity */
-const SYNONYM_STEMS: Record<string, string> = {
-  mangi: 'pasto', pranz: 'pasto', cena: 'pasto', cenar: 'pasto', colaz: 'pasto', meren: 'pasto', spunt: 'pasto',
-  studi: 'studi', ripas: 'studi',
-  palest: 'allen', allen: 'allen',
-};
+const CLAUSE_SEPARATOR = /[,;\n]+|\.(?:\s+|$)|\s+(?:e poi|poi|ma|però|pero|anche se)\s+/i;
 
-/** Word stems matched at the start of a word, checked in order */
-const CATEGORY_KEYWORDS: [TaskCategory, string[]][] = [
-  ['health', ['palestra', 'medic', 'dottor', 'dentist', 'allenament', 'allenarm', 'corsa', 'correre', 'yoga', 'pilates', 'visita', 'farmacia', 'nuot', 'cammin', 'fisioterap']],
-  ['study', ['studi', 'esame', 'lezion', 'ripass', 'compit', 'corso', 'universit', 'libro', 'legger', 'pagin', 'capitol', 'tesi']],
-  ['work', ['lavor', 'riunion', 'meeting', 'call', 'mail', 'email', 'client', 'progett', 'ufficio', 'report', 'presentazion', 'colloqui']],
-  ['chores', ['spesa', 'pulir', 'pulizi', 'lavatric', 'bucato', 'cucinar', 'stirar', 'bollett', 'piatti', 'aspirapolvere', 'riordin', 'supermercato']],
-];
+/** Marks a clause that was written in brackets */
+const ASIDE_MARK = '\u0001';
 
-const MEAL_OR_TRAVEL_STEMS = [
-  'pranz', 'cena', 'cenare', 'colazion', 'aperitiv', 'merend', 'spuntin', 'brunch',
-  'andare', 'tornare', 'rientrare', 'spostament', 'viaggi', 'tragitt', 'raggiunger', 'accompagnar', 'guidare',
-];
+/** Verbs of motion that, before "a" + another verb, aren't the action ("andare a parlare con Riccardo") */
+const MOTION_VERBS = new Set(['andare', 'vado', 'vai', 'va', 'passare', 'passo', 'uscire', 'esco', 'tornare', 'torno']);
 
-const WEEKDAYS = ['domenica', 'luned[iì]', 'marted[iì]', 'mercoled[iì]', 'gioved[iì]', 'venerd[iì]', 'sabato'];
-
-/** A clock time, optionally with an alternative after a slash ("14:00/14:30") */
-const TIME = String.raw`(\d{1,2}(?:[:.]\d{2})?(?:\s*\/\s*\d{1,2}(?:[:.]\d{2})?)?)`;
-/** A time not followed by a unit, so "entro 2 ore" isn't read as "entro le 2" */
-const CLOCK_TIME = String.raw`${TIME}(?!\s*(?:ore|ora|h|minuti|min)\b)`;
-
-const RANGE_PATTERNS = [
-  new RegExp(String.raw`\b(?:dalle|dall'|da)\s*(?:ore\s+)?${TIME}\s*(?:alle|all'|a)\s*(?:ore\s+)?${TIME}\b`),
-  /\b(\d{1,2}[:.]\d{2})\s*-\s*(\d{1,2}[:.]\d{2})\b/,
-];
-const SINGLE_TIME_PATTERN = new RegExp(String.raw`\b(?:alle|all'|verso le|ore)\s*(?:ore\s+)?${TIME}\b`);
-const MIDDAY_PATTERN = /\b(?:a\s+)?mezzogiorno\b/;
-
-/** "tra le 15 e le 18" */
-const BETWEEN_PATTERN = new RegExp(String.raw`\b(?:tra|fra)\s+le\s+(?:ore\s+)?${CLOCK_TIME}\s+e\s+le\s+(?:ore\s+)?${CLOCK_TIME}`);
-/** "tra le 14/14:30": start between the alternatives */
-const START_BETWEEN_PATTERN = new RegExp(String.raw`\b(?:tra|fra)\s+le\s+(?:ore\s+)?${CLOCK_TIME}(?!\s*e\s+le)`);
-
-/** "non riesco", "non penso di riuscire": a time next to it is excluded, not a start */
-const NEGATION_PATTERN =
-  /\bnon\s+(?:(?:penso|credo)\s+di\s+(?:riuscire|farcela|fare in tempo|arrivare)|riesco|riuscir[oò]|posso|potr[oò]|ce la faccio|ce la far[oò]|faccio in tempo|arrivo|arriver[oò]|ci sono|ci sar[oò]|sono liber[oa]|sar[oò] liber[oa]|torno|rientro)\b/;
-/** A time introduced by "alle" & co. ("non alle 13:30" is excluded even without a verb) */
-const PLAIN_TIME_PATTERN = new RegExp(String.raw`\b(?:non\s+)?(?:alle|all'|per le|verso le|ore)\s*(?:ore\s+)?${CLOCK_TIME}`);
-/** "dopo le 15", "dalle 15 in poi" */
-const NOT_BEFORE_PATTERN = new RegExp(
-  String.raw`\b(?:non prima delle|non prima di|dopo le|dopo l'|a partire dalle|a partire dall'|dalle|dall')\s*(?:ore\s+)?${CLOCK_TIME}(?:\s+in poi)?`,
-);
-/** "prima delle 18", "entro le 18" */
-const NOT_AFTER_PATTERN = new RegExp(
-  String.raw`\b(?:prima delle|prima dell'|prima di|entro le|entro l'|entro|non oltre le|non dopo le|fino alle|fino all')\s*(?:ore\s+)?${CLOCK_TIME}`,
-);
-const NAMED_WINDOWS: [RegExp, TimeWindow][] = [
-  [/\bdopo (?:il )?pranzo\b/, { minStartMinutes: 14 * 60 }],
-  [/\bprima (?:di|del) pranzo\b/, { maxEndMinutes: 12 * 60 + 30 }],
-  [/\bdopo (?:la )?cena\b/, { minStartMinutes: 21 * 60 }],
-  [/\bprima (?:di|della) cena\b/, { maxEndMinutes: 19 * 60 + 30 }],
-  [/\b(?:(?:di|del|in|nella)\s+)?(?:mattinata|mattina|mattino)\b|\bstamattina\b/, { maxEndMinutes: 12 * 60 }],
-  [/\b(?:(?:di|del|nel)\s+)?pomeriggio\b/, { minStartMinutes: 14 * 60, maxEndMinutes: 19 * 60 }],
-  [/\b(?:(?:di|della|in|nella)\s+)?(?:serata|sera)\b|\bstasera\b/, { minStartMinutes: 18 * 60 }],
-];
-
-/** Travel time to a place ("a 5 minuti da casa"), not the task duration */
-const TRAVEL_PATTERN =
-  /\b(?:(?:che\s+)?(?:è|e'|dista|si trova)\s+)?(?:a\s+)?\d+\s*(?:minuti|min)\s+(?:a piedi|di (?:distanza|strada|cammino|macchina|auto|bici|tragitto)|in (?:macchina|auto|bici|bicicletta|moto|metro|autobus|bus|treno)|(?:da|dal|dalla|dall')\s*[^\s,;.]+|lontan[oa])/;
-
-/** Clauses describing the situation, not a task ("ora mi trovo a casa", "orario indefinito") */
-const STOP_BEFORE_CONJUNCTION = String.raw`(?:(?!\s(?:e|ma|però|poi|quindi|devo|dovrei|voglio|vorrei|ho)\s)[^,;.\n])*`;
-const CONTEXT_PATTERNS = [
-  new RegExp(String.raw`\b(?:(?:ora|adesso|attualmente|in questo momento)\s+)?mi trovo\b${STOP_BEFORE_CONJUNCTION}`, 'gi'),
-  new RegExp(
-    String.raw`\b(?:ora|adesso|attualmente|in questo momento)\s+(?:sono|sto)\s+(?:a|in|al|alla|allo|ai|da|dal|dalla|fuori)\b${STOP_BEFORE_CONJUNCTION}`,
-    'gi',
-  ),
-  /\b(?:orario|ora)\s+(?:indefinit[oa]|non definit[oa]|libero|flessibile|qualsiasi|a scelta)\b/gi,
-  /\bsenza\s+(?:un\s+)?orario(?:\s+(?:preciso|fisso|definito))?\b/gi,
-  /\b(?:quando\s+(?:vuoi|capita|posso|riesco|ho tempo)|in qualsiasi momento|a qualsiasi ora|non importa (?:quando|l'orario|l'ora))\b/gi,
-];
-
-/** "non arrivo prima delle 15", "posticipa la riunione", "sono in ritardo" */
-const DELAY_PATTERNS = [
-  NEGATION_PATTERN,
-  /\b(?:posticipa(?:re)?|rimanda(?:re)?|ritarda(?:re)?|slitta(?:re)?|sposta(?:re)?(?:\s+(?:più\s+)?(?:avanti|in avanti))?)\b/,
-  /\b(?:sono|sar[oò])\s+in\s+ritardo\b|\b(?:ritardo|arrivo tardi|faccio tardi|arriver[oò] tardi)\b/,
-  /\b(?:arrivo|arriver[oò]|torno|torner[oò]|rientro|sar[oò] liber[oa]|sono liber[oa])\s+(?:solo\s+)?(?=(?:alle|all'|dopo le|verso le|per le)\b)/,
-];
-
-/** End of a word ending in an accented letter ("più"), where \b doesn't work */
-const WORD_END = String.raw`(?![\wàèéìòù])`;
-
-/** "ci metto più tempo a studiare", "allunga la riunione", "mi servono 20 minuti in più" */
-const EXTEND_PATTERNS = [
-  new RegExp(
-    String.raw`\b(?:ci\s+)?(?:metto|metter[oò]|vuole|vorr[aà]|serve|servono|servir[aà]|occorre)\s+(?:(?:un po'|molto|ancora)\s+)?(?:di\s+)?(?:più|piu|altro|altri|altre)(?:\s+tempo)?${WORD_END}`,
-  ),
-  new RegExp(String.raw`\bho bisogno di\s+(?:(?:un po'|ancora)\s+)?(?:più|piu|altro|altri)(?:\s+tempo)?${WORD_END}`),
-  /\b(?:allunga(?:re)?|prolunga(?:re)?|estendi|estendere)\b/,
-  new RegExp(String.raw`\b(?:dura|durer[aà]|richiede|richieder[aà])\s+(?:di\s+)?(?:più|piu)${WORD_END}`),
-  /\b(?:mi\s+)?(?:serve|servono)\s+(?:ancora\s+)?(?=\d|un|mezz)/,
-  new RegExp(String.raw`\bin più${WORD_END}`),
-];
-
-/** Times bounding a delay; the latest one wins ("non prima delle 14:00/14:30" -> 14:30) */
-const DELAY_TIME_PATTERN = new RegExp(
-  String.raw`\b(?:non prima delle|non prima di|prima delle|prima dell'|prima di|fino alle|fino all'|dopo le|dopo l'|verso le|per le|alle|all'|dalle|dall')\s*(?:ore\s+)?${CLOCK_TIME}`,
-  'g',
-);
-
-/** Words around a task reference that aren't part of its name */
-const REFERENCE_FILLER =
-  /^(?:mi|ci|a|ad|per|con|da|di|nel|nello|nella|nei|negli|nelle|col|coi|sul|sullo|sulla|al|allo|alla|ai|agli|alle|in|più|piu|tempo|fare|finire|mio|mia|miei|mie)(?:\s+|$)|\s+(?:in più|di più|più|piu|ancora|oggi)$/i;
-const ALL_ACTIVITIES = /^(?:tutto|tutti|tutte|il resto|resto|le attività|attività|gli impegni|impegni|i task|task|quello che segue|le prossime attività)$/i;
-
-const SEGMENT_SEPARATOR = /[,;\n]+|\.\s+|\s+e poi\s+|\s+poi\s+/i;
-const LEADING_CONJUNCTION = /^(?:e|ma|però|pero|poi|quindi|inoltre|ora|adesso|magari|meglio|facciamo|piuttosto|forse|anzi|diciamo)(?:\s+|$)/i;
-/** Negation left at the start of a title ("non penso di riuscire a mangiare" -> "mangiare") */
-const LEADING_NEGATION =
-  /^non\s+(?:(?:penso|credo)\s+di\s+(?:riuscire|farcela|fare in tempo)|riesco|riuscir[oò]|posso|potr[oò]|ce la faccio|ce la far[oò])\s+(?:a\s+|ad\s+)?/i;
-const LEADING_FILLER = /^(?:(?:io|che)\s+)?(?:devo|dovrei|voglio|vorrei|bisogna|tocca|ho|avr[oò]|c'[eè]|ricordami di|ricordati di|ricorda di|mi serve)\s+/i;
-const LEADING_ARTICLE = /^(?:un|una|uno|il|lo|la|i|gli|le)\s+|^l'/i;
-const TRAILING_CONNECTOR = /\s+(?:per|di|da|a|e|ma|in|verso|circa)$/i;
-
-interface Match {
-  index: number;
-  length: number;
+interface AnalyzedClause {
+  text: string;
+  slots: TimeSlots;
+  cues: Cues;
+  /** What the clause talks about: no time expressions, intent words or filler */
+  content: ConceptBag;
+  contentWords: string[];
+  /** Only adds details to the main clause: "posso andarci tra le 15 e le 17", "(verso le 13)" */
+  isModifier: boolean;
 }
 
-interface TimeMatch extends Match {
-  startMinutes: number;
-  endMinutes?: number;
+/** A clause naming something, with the clauses that add details to it */
+interface ClauseGroup {
+  main?: AnalyzedClause;
+  modifiers: AnalyzedClause[];
 }
 
-interface DurationMatch extends Match {
-  minutes: number;
-  /** Written as "per 5 minuti" */
-  explicit: boolean;
+function toTime(minutes: number | undefined): string | undefined {
+  return minutes !== undefined ? minutesToTime(minutes) : undefined;
 }
 
-interface DateMatch extends Match {
-  dateString: string;
+function isInSpans(token: { start: number; end: number }, spans: Span[]): boolean {
+  return spans.some(({ index, length }) => token.start >= index && token.end <= index + length);
 }
 
-interface TimeWindow {
-  minStartMinutes?: number;
-  /** Latest start ("tra le 14/14:30"), turned into maxEndTime with the task duration */
-  maxStartMinutes?: number;
-  maxEndMinutes?: number;
+/** Splits the text into clauses; text in brackets becomes a clause of its own, marked as an aside. */
+function splitClauses(text: string): { text: string; aside: boolean }[] {
+  const marked = text.replace(
+    /[([]([^)\]]*)[)\]]/g,
+    (_, inner: string) => `;${ASIDE_MARK}${inner.replace(/[,;]/g, ' ')};`,
+  );
+  const withoutContext = CONTEXT_PATTERNS.reduce((result, pattern) => result.replace(pattern, ';'), marked);
+  return withoutContext
+    .split(CLAUSE_SEPARATOR)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) =>
+      part.startsWith(ASIDE_MARK) ? { text: part.slice(1).trim(), aside: true } : { text: part, aside: false },
+    )
+    .filter((clause) => clause.text);
 }
 
-interface ParsedSegment {
-  /** null when the clause only carries constraints ("dopo le 15") */
-  item: Partial<CalendarItem> | null;
-  explicitDuration: boolean;
-  window: TimeWindow;
-  dateString?: string;
+function analyzeClause(clause: { text: string; aside: boolean }, date: string): AnalyzedClause {
+  const tokens = tokenize(clause.text);
+  const cues = detectCues(tokens.map((token) => token.word));
+  const slots = findTimeSlots(clause.text, date, cues.negatedAbility);
+  const contentTokens = tokens.filter(
+    (token) => !isInSpans(token, slots.spans) && !cues.cueWords.has(token.word) && !WHOLE_DAY_WORDS.has(token.word),
+  );
+  const content = conceptBag(contentTokens.map((token) => token.text).join(' '));
+  const contentWords = contentTokens.map((token) => token.word).filter((word) => !FUNCTION_WORDS.has(word));
+  return {
+    text: clause.text,
+    slots,
+    cues,
+    content,
+    contentWords,
+    isModifier:
+      clause.aside || totalWeight(content) < MIN_CONTENT_WEIGHT || contentWords.every((word) => hasClitic(word)),
+  };
+}
+
+/** Each main clause takes the modifiers after it; modifiers before any main clause go to the first one. */
+function groupClauses(clauses: AnalyzedClause[]): ClauseGroup[] {
+  const groups: ClauseGroup[] = [];
+  let leading: AnalyzedClause[] = [];
+  for (const clause of clauses) {
+    if (!clause.isModifier) {
+      groups.push({ main: clause, modifiers: leading });
+      leading = [];
+    } else if (groups.length) {
+      groups[groups.length - 1].modifiers.push(clause);
+    } else {
+      leading.push(clause);
+    }
+  }
+  // Only details: "non arrivo prima delle 14:30", "ho bisogno di più tempo"
+  if (!groups.length && leading.length) {
+    groups.push({ modifiers: leading });
+  }
+  return groups;
+}
+
+/** The group's cues together: an intent said in a modifier applies to the main clause too */
+function mergeCues(clauses: AnalyzedClause[]): Cues {
+  const merged = detectCues([]);
+  for (const { cues } of clauses) {
+    for (const key of ['clearAll', 'remove', 'everyMatch', 'extend', 'delay', 'negatedAbility', 'arrival'] as const) {
+      merged[key] ||= cues[key];
+    }
+    cues.cueWords.forEach((word) => merged.cueWords.add(word));
+  }
+  return merged;
+}
+
+/** The group's time expressions together; the main clause's come first */
+function mergeSlots(clauses: AnalyzedClause[]): TimeSlots {
+  const merged: TimeSlots = { spans: [] };
+  for (const { slots } of clauses) {
+    merged.range ??= slots.range;
+    merged.time ??= slots.time;
+    merged.excluded ??= slots.excluded;
+    merged.between ??= slots.between;
+    merged.notBefore ??= slots.notBefore;
+    merged.notAfter ??= slots.notAfter;
+    merged.named ??= slots.named;
+    merged.duration ??= slots.duration;
+    merged.date ??= slots.date;
+  }
+  return merged;
+}
+
+/** Creating or restating a task: an excluded time and the bounds said limit when it can happen */
+function statementWindow(slots: TimeSlots): TimeWindow {
+  const minStarts = [
+    slots.excluded && slots.excluded.last + EXCLUDED_TIME_OFFSET_MINUTES,
+    slots.between?.minStartMinutes,
+    slots.notBefore?.last,
+    slots.named?.minStartMinutes,
+  ].filter((minutes): minutes is number => minutes !== undefined);
+  const maxEnds = [slots.between?.maxEndMinutes, slots.notAfter?.first, slots.named?.maxEndMinutes].filter(
+    (minutes): minutes is number => minutes !== undefined,
+  );
+  return {
+    minStartMinutes: minStarts.length ? Math.max(...minStarts) : undefined,
+    maxStartMinutes: slots.between?.maxStartMinutes,
+    maxEndMinutes: maxEnds.length ? Math.min(...maxEnds) : undefined,
+  };
+}
+
+/** Delaying: every time said bounds when the task can start, and the latest wins ("14:00/14:30" -> 14:30) */
+function delayStart(slots: TimeSlots): number | undefined {
+  const bounds = [
+    slots.excluded && slots.excluded.last + EXCLUDED_TIME_OFFSET_MINUTES,
+    slots.between?.minStartMinutes,
+    slots.notBefore?.last,
+    slots.notAfter?.last,
+    slots.time?.last,
+    slots.range?.start,
+  ].filter((minutes): minutes is number => minutes !== undefined);
+  return bounds.length ? Math.max(...bounds) : undefined;
+}
+
+/** An explicit time ("alle 15", "dalle 10 alle 11", "alle 14:00/14:30"), unless it was excluded */
+function explicitTimes(slots: TimeSlots): { start: number; end?: number } | null {
+  if (slots.excluded) return null;
+  if (slots.range) return { start: slots.range.start, end: slots.range.end };
+  if (slots.time) return { start: slots.time.first, end: slots.time.last > slots.time.first ? slots.time.last : undefined };
+  return null;
 }
 
 /**
- * Hours without a day part are read as the most likely time for an agenda:
- * "alle 3" -> 15:00, unless the text says "mattina".
+ * The core of the action named by a clause: "non penso di riuscire a mangiare alle 13:30" -> "Mangiare",
+ * "vado a parlare con Riccardo" -> "Parlare con Riccardo". Time expressions, intent words and
+ * filler at the edges are removed; the words in between are kept as written.
  */
-function toDayMinutes(hours: number, minutes: number, text: string): number | null {
-  if (hours > 23 || minutes > 59) {
-    return null;
-  }
-  const isAfternoon = /\b(?:pomeriggio|sera|stasera)\b/.test(text);
-  const isMorning = /\b(?:mattina|mattino|stamattina)\b/.test(text);
-  if (hours < 12 && (isAfternoon || (!isMorning && hours >= 1 && hours <= 7))) {
-    hours += 12;
-  }
-  return hours * 60 + minutes;
-}
+function extractTitle(clause: AnalyzedClause): string {
+  const removed = (token: { word: string; start: number; end: number }) =>
+    isInSpans(token, clause.slots.spans) || clause.cues.cueWords.has(token.word);
+  const tokens = tokenize(clause.text).filter((token) => !removed(token));
 
-interface ClockRange {
-  first: number;
-  last: number;
-}
-
-/** "14:30" or "14:00/14:30" -> minutes of the earliest and latest alternative */
-function parseClock(token: string, text: string): ClockRange | null {
-  const minutes: number[] = [];
-  for (const part of token.split('/')) {
-    const [hours, mins = '0'] = part.trim().split(/[:.]/);
-    const value = toDayMinutes(Number(hours), Number(mins), text);
-    if (value === null) return null;
-    minutes.push(value);
-  }
-  return { first: Math.min(...minutes), last: Math.max(...minutes) };
-}
-
-/** Replaces a match with spaces, so later patterns can't reuse it and indexes stay valid. */
-function blank(text: string, { index, length }: Match): string {
-  return text.slice(0, index) + ' '.repeat(length) + text.slice(index + length);
-}
-
-function findRange(text: string, original: string): TimeMatch | null {
-  for (const pattern of RANGE_PATTERNS) {
-    const match = pattern.exec(text);
-    if (!match) continue;
-    const start = parseClock(match[1], original);
-    const end = parseClock(match[2], original);
-    if (!start || !end) continue;
-    const startMinutes = start.first;
-    let endMinutes = end.last;
-    // "dalle 11 alle 1" -> 11:00-13:00
-    if (endMinutes <= startMinutes && endMinutes + 12 * 60 > startMinutes && endMinutes < 12 * 60) {
-      endMinutes += 12 * 60;
-    }
-    if (endMinutes <= startMinutes) {
-      endMinutes = startMinutes + DEFAULT_FIXED_MINUTES;
-    }
-    return { index: match.index, length: match[0].length, startMinutes, endMinutes };
-  }
-  return null;
-}
-
-function findSingleTime(text: string, original: string): TimeMatch | null {
-  const single = SINGLE_TIME_PATTERN.exec(text);
-  const clock = single && parseClock(single[1], original);
-  if (single && clock) {
-    // "alle 14:00/14:30" is the window 14:00-14:30
-    const endMinutes = clock.last > clock.first ? clock.last : undefined;
-    return { index: single.index, length: single[0].length, startMinutes: clock.first, endMinutes };
-  }
-  const midday = MIDDAY_PATTERN.exec(text);
-  return midday ? { index: midday.index, length: midday[0].length, startMinutes: 12 * 60 } : null;
-}
-
-/** "tra le 14 e le 16" (start after, end before) or "tra le 14/14:30" (start between). */
-function findBetween(text: string, original: string): { window: TimeWindow; match: Match } | null {
-  const between = BETWEEN_PATTERN.exec(text);
-  if (between) {
-    // With alternatives ("14:00/14:30") the most conservative bound is used
-    return {
-      window: {
-        minStartMinutes: parseClock(between[1], original)?.last,
-        maxEndMinutes: parseClock(between[2], original)?.first,
-      },
-      match: { index: between.index, length: between[0].length },
-    };
-  }
-  const startBetween = START_BETWEEN_PATTERN.exec(text);
-  const clock = startBetween && parseClock(startBetween[1], original);
-  if (startBetween && clock) {
-    return {
-      window: { minStartMinutes: clock.first, maxStartMinutes: clock.last },
-      match: { index: startBetween.index, length: startBetween[0].length },
-    };
-  }
-  return null;
-}
-
-/** "non riesco alle 13:30": the time can't be the start, the new slot begins after it. */
-function findExcludedTime(text: string, original: string): { match: Match; minStartMinutes: number } | null {
-  const time = PLAIN_TIME_PATTERN.exec(text);
-  if (!time || !(NEGATION_PATTERN.test(original) || /^non\b/.test(time[0]))) {
-    return null;
-  }
-  const clock = parseClock(time[1], original);
-  return clock && {
-    match: { index: time.index, length: time[0].length },
-    minStartMinutes: clock.last + EXCLUDED_TIME_OFFSET_MINUTES,
-  };
-}
-
-/** Finds time windows ("dopo le 15", "prima di cena"); returns the window and the matched spans. */
-function findWindow(text: string, original: string): { window: TimeWindow; matches: Match[] } {
-  const window: TimeWindow = {};
-  const matches: Match[] = [];
-  let remaining = text;
-  const consume = (match: RegExpExecArray) => {
-    const span = { index: match.index, length: match[0].length };
-    matches.push(span);
-    remaining = blank(remaining, span);
-  };
-
-  const between = findBetween(remaining, original);
-  if (between) {
-    Object.assign(window, between.window);
-    matches.push(between.match);
-    remaining = blank(remaining, between.match);
-  }
-  const notBefore = NOT_BEFORE_PATTERN.exec(remaining);
-  if (notBefore) {
-    window.minStartMinutes = parseClock(notBefore[1], original)?.last;
-    consume(notBefore);
-  }
-  const notAfter = NOT_AFTER_PATTERN.exec(remaining);
-  if (notAfter) {
-    window.maxEndMinutes = parseClock(notAfter[1], original)?.first;
-    consume(notAfter);
-  }
-  for (const [pattern, named] of NAMED_WINDOWS) {
-    const match = pattern.exec(remaining);
-    if (match) {
-      window.minStartMinutes ??= named.minStartMinutes;
-      window.maxEndMinutes ??= named.maxEndMinutes;
-      consume(match);
+  let first = 0;
+  let last = tokens.length - 1;
+  for (;;) {
+    const word = tokens[first]?.word;
+    if (word === undefined) break;
+    if (FUNCTION_WORDS.has(word) || LEADING_MOTION_VERBS.has(word) || hasClitic(word) || WHOLE_DAY_WORDS.has(word)) {
+      first++;
+    } else if (
+      MOTION_VERBS.has(word) &&
+      (tokens[first + 1]?.word === 'a' || tokens[first + 1]?.word === 'ad') &&
+      /(are|ere|ire)$/.test(tokens[first + 2]?.word ?? '')
+    ) {
+      first += 2;
+    } else {
+      break;
     }
   }
-  return { window, matches };
-}
+  // "... posso andarci": modal verbs and verbs pointing back aren't part of the name
+  while (last >= first && (FUNCTION_WORDS.has(tokens[last].word) || hasClitic(tokens[last].word))) last--;
+  if (first > last) return '';
 
-function findDuration(text: string): DurationMatch | null {
-  const patterns: [RegExp, (match: RegExpExecArray) => number][] = [
-    [/\b(\d+(?:[.,]\d+)?)\s*(?:ore|ora|h)\s+e\s+mezz[ao]\b/, (m) => parseFloat(m[1].replace(',', '.')) * 60 + 30],
-    [/\b(\d+)\s*h\s*(\d{1,2})\b/, (m) => Number(m[1]) * 60 + Number(m[2])],
-    [
-      /\b(\d+(?:[.,]\d+)?)\s*(?:ore|ora|h)(?:\s+e\s+(\d+)\s*(?:minuti|min))?\b/,
-      (m) => parseFloat(m[1].replace(',', '.')) * 60 + Number(m[2] ?? 0),
-    ],
-    [/\bun'?\s?ora\s+e\s+mezz[ao]\b/, () => 90],
-    [/\bun'?\s?ora\b/, () => 60],
-    [/\bmezz'?\s?ora\b/, () => 30],
-    [/\bun quarto d'ora\b/, () => 15],
-    [/\b(\d+)\s*(?:minuti|min)\b/, (m) => Number(m[1])],
-  ];
-  for (const [pattern, toMinutes] of patterns) {
-    const match = pattern.exec(text);
-    if (match) {
-      const minutes = Math.round(toMinutes(match));
-      if (minutes > 0) {
-        const explicit = /\bper\s+$/.test(text.slice(0, match.index));
-        return { index: match.index, length: match[0].length, minutes, explicit };
-      }
-    }
+  // The original text between the first and last kept word, without the removed words inside it
+  const start = tokens[first].start;
+  const end = tokens[last].end;
+  const inner = tokenize(clause.text).filter((token) => token.start >= start && token.end <= end && removed(token));
+  let title = clause.text.slice(start, end);
+  for (const token of inner.reverse()) {
+    title = `${title.slice(0, token.start - start)} ${title.slice(token.end - start)}`;
   }
-  return null;
-}
-
-function findDate(text: string, baseDate: string): DateMatch | null {
-  const relative: [RegExp, number][] = [
-    [/\bdopodomani\b/, 2],
-    [/\bdomani\b/, 1],
-    [/\b(?:oggi|stasera|stamattina|stamani)\b/, 0],
-  ];
-  for (const [pattern, offset] of relative) {
-    const match = pattern.exec(text);
-    if (match) {
-      return { index: match.index, length: match[0].length, dateString: addDays(baseDate, offset) };
-    }
-  }
-
-  const weekday = new RegExp(String.raw`\b(?:(?:il|la|di|per)\s+)?(${WEEKDAYS.join('|')})(?!\w)`).exec(text);
-  if (weekday) {
-    const target = WEEKDAYS.findIndex((day) => new RegExp(`^${day}$`).test(weekday[1]));
-    const current = parseDateString(baseDate).getDay();
-    // Next occurrence, never today: "lunedì" said on a Monday means next week
-    const offset = (target - current + 7) % 7 || 7;
-    return { index: weekday.index, length: weekday[0].length, dateString: addDays(baseDate, offset) };
-  }
-  return null;
-}
-
-function matchesStem(text: string, stems: string[]): boolean {
-  return stems.some((stem) => new RegExp(`(?:^|[^\\p{L}])${stem}`, 'u').test(text));
-}
-
-function findCategory(text: string): TaskCategory | undefined {
-  return CATEGORY_KEYWORDS.find(([, stems]) => matchesStem(text, stems))?.[0];
-}
-
-function detectCategory(text: string): TaskCategory {
-  return findCategory(text) ?? 'personal';
-}
-
-/** The title left after removing the matched expressions and filler words; empty if nothing is left. */
-function cleanTitle(text: string, matches: Match[]): string {
-  let title = text;
-  // Remove from the end so earlier indexes stay valid
-  for (const { index, length } of [...matches].sort((a, b) => b.index - a.index)) {
-    title = `${title.slice(0, index)} ${title.slice(index + length)}`;
-  }
-  title = title.replace(/\s+/g, ' ').replace(/^[\s\-:.,;!?]+|[\s\-:.,;!?]+$/g, '');
-
-  let previous: string;
-  do {
-    previous = title;
-    title = title
-      .replace(LEADING_CONJUNCTION, '')
-      .replace(LEADING_NEGATION, '')
-      .replace(LEADING_FILLER, '')
-      .replace(LEADING_ARTICLE, '')
-      .replace(/^(?:per|a|ad)\s+/i, '')
-      .replace(TRAILING_CONNECTOR, '')
-      .trim();
-  } while (title !== previous);
-
+  title = title
+    .replace(/[()[\]]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s\-:.,;!?']+|[\s\-:.,;!?]+$/g, '');
   return title && title.charAt(0).toUpperCase() + title.slice(1);
 }
 
-function parseSegment(segment: string, baseDate: string): ParsedSegment {
-  // Same length as `segment`, so match indexes can be used on the original text
-  const original = segment.toLowerCase();
-  const matches: Match[] = [];
-  let text = original;
-  const consume = <T extends Match>(match: T | null): T | null => {
-    if (match) {
-      matches.push(match);
-      text = blank(text, match);
-    }
-    return match;
-  };
+function distanceFromNow(item: CalendarItem, now: Date): number {
+  const range = getItemTimeRange(item);
+  if (!range) return Infinity;
+  const start = new Date(range.start).getTime();
+  const end = new Date(range.end).getTime();
+  return start <= now.getTime() && now.getTime() < end ? 0 : Math.abs(start - now.getTime());
+}
 
-  const travel = TRAVEL_PATTERN.exec(text);
-  consume(travel && { index: travel.index, length: travel[0].length });
-  const excluded = findExcludedTime(text, original);
-  if (excluded) {
-    consume(excluded.match);
-    const negation = NEGATION_PATTERN.exec(text);
-    consume(negation && { index: negation.index, length: negation[0].length });
-  }
-  const range = excluded ? null : consume(findRange(text, original));
-  const { window, matches: windowMatches }: { window: TimeWindow; matches: Match[] } = range
-    ? { window: {}, matches: [] }
-    : findWindow(text, original);
-  windowMatches.forEach(consume);
-  if (excluded) {
-    window.minStartMinutes = Math.max(window.minStartMinutes ?? 0, excluded.minStartMinutes);
-  }
-  const time = range ?? consume(findSingleTime(text, original));
-  const duration = consume(findDuration(text));
-  const date = consume(findDate(text, baseDate));
+/**
+ * The tasks of the day that `content` names, best first. With `category`, when no title
+ * matches, the tasks of that category ("ci metto di più a cucinare" -> the chores).
+ */
+function findTasks(
+  content: ConceptBag,
+  tasks: CalendarItem[],
+  now: Date,
+  category?: TaskCategory,
+): CalendarItem[] {
+  const candidates = tasks.filter((task) => task.status !== 'completed');
+  const matches = candidates
+    .map((task) => ({ task, similarity: similarity(content, conceptBag(task.title)) }))
+    .filter(({ similarity: match }) => isMatch(match))
+    .sort(
+      (a, b) =>
+        matchScore(b.similarity) - matchScore(a.similarity) || distanceFromNow(a.task, now) - distanceFromNow(b.task, now),
+    )
+    .map(({ task }) => task);
+  if (matches.length || !category) return matches;
+  return candidates
+    .filter((task) => task.category === category && getItemTimeRange(task))
+    .sort((a, b) => distanceFromNow(a, now) - distanceFromNow(b, now));
+}
 
-  const title = cleanTitle(segment, matches);
-  if (!title && !time) {
-    return { item: null, explicitDuration: false, window, dateString: date?.dateString };
-  }
+/** "ho bisogno di più tempo": the task in progress, else the last one started, else the next */
+function findCurrentTask(tasks: CalendarItem[], now: Date): CalendarItem | null {
+  const timed = tasks
+    .filter((task) => task.status !== 'completed' && getItemTimeRange(task))
+    .map((task) => ({ task, start: new Date(getItemTimeRange(task)!.start).getTime() }));
+  const started = timed.filter(({ start }) => start <= now.getTime()).sort((a, b) => b.start - a.start);
+  const upcoming = timed.filter(({ start }) => start > now.getTime()).sort((a, b) => a.start - b.start);
+  return started[0]?.task ?? upcoming[0]?.task ?? null;
+}
 
-  const category = detectCategory(text);
-  const isMealOrTravel = matchesStem(text, MEAL_OR_TRAVEL_STEMS);
-  const minMinutes = isMealOrTravel && !duration?.explicit ? MIN_MEAL_OR_TRAVEL_MINUTES : 0;
-  const dateString = date?.dateString ?? baseDate;
+function buildTask(main: AnalyzedClause, slots: TimeSlots, date: string): ParsedAction {
+  const title = extractTitle(main) || 'Nuovo impegno';
+  const category = findCategory(main.contentWords) ?? 'personal';
+  const minMinutes =
+    isMealOrTravel(main.contentWords) && !slots.duration?.explicit ? MIN_MEAL_OR_TRAVEL_MINUTES : 0;
+  const dateString = slots.date ?? date;
+  const times = explicitTimes(slots);
+  const explicitDuration = slots.duration !== undefined;
 
-  if (time) {
-    const minutes = Math.max(duration?.minutes ?? DEFAULT_FIXED_MINUTES, minMinutes);
+  if (times) {
+    const minutes = Math.max(slots.duration?.minutes ?? DEFAULT_FIXED_MINUTES, minMinutes);
     return {
-      item: {
-        title: title || 'Nuovo impegno',
+      action: 'CREATE',
+      task: {
+        title,
         type: 'fixed',
         category,
-        fixedStartTime: combineDateAndMinutes(dateString, time.startMinutes),
-        fixedEndTime: combineDateAndMinutes(dateString, time.endMinutes ?? time.startMinutes + minutes),
+        fixedStartTime: combineDateAndMinutes(dateString, times.start),
+        fixedEndTime: combineDateAndMinutes(dateString, times.end ?? times.start + minutes),
         status: 'pending',
       },
-      explicitDuration: duration !== null,
-      window,
+      explicitDuration,
     };
   }
 
+  const estimatedMinutes = Math.max(slots.duration?.minutes ?? DEFAULT_FLEXIBLE_MINUTES[category], minMinutes);
+  const window = statementWindow(slots);
+  const latestEnd = window.maxStartMinutes !== undefined ? window.maxStartMinutes + estimatedMinutes : undefined;
+  const maxEnd = Math.min(window.maxEndMinutes ?? Infinity, latestEnd ?? Infinity);
   return {
-    item: {
+    action: 'CREATE',
+    task: {
       title,
       type: 'flexible',
       category,
-      estimatedMinutes: Math.max(duration?.minutes ?? DEFAULT_FLEXIBLE_MINUTES[category], minMinutes),
+      estimatedMinutes,
       scheduledDate: dateString,
+      minStartTime: toTime(window.minStartMinutes),
+      maxEndTime: maxEnd !== Infinity ? minutesToTime(maxEnd) : undefined,
       status: 'pending',
     },
-    explicitDuration: duration !== null,
-    window,
+    explicitDuration,
   };
 }
 
-/** Applies a window to a flexible task; fixed events already have their times. */
-function applyWindow(item: Partial<CalendarItem>, { minStartMinutes, maxStartMinutes, maxEndMinutes }: TimeWindow): void {
-  if (item.type !== 'flexible') return;
-  if (minStartMinutes !== undefined) item.minStartTime = minutesToTime(minStartMinutes);
-  const latestEnd =
-    maxStartMinutes !== undefined && item.estimatedMinutes ? maxStartMinutes + item.estimatedMinutes : undefined;
-  const maxEnd = Math.min(maxEndMinutes ?? Infinity, latestEnd ?? Infinity);
-  if (maxEnd !== Infinity) item.maxEndTime = minutesToTime(maxEnd);
-}
-
-/**
- * Turns free text into draft calendar items, one per clause
- * ("riunione dalle 10 alle 11, poi studiare per 2 ore").
- * Clauses with an explicit time become fixed events, the others flexible tasks.
- * Clauses with only a constraint ("dopo le 15") apply to the previous task,
- * and context clauses ("ora mi trovo a casa") are ignored.
- * `baseDate` ("YYYY-MM-DD") is the day relative words like "domani" refer to.
- */
-export function parseInputToTasks(text: string, baseDate = toDateString(new Date())): ParseResult {
-  const rawText = text.trim();
-  const cleaned = CONTEXT_PATTERNS.reduce(
-    (result, pattern) => result.replace(pattern, ','),
-    rawText.replace(/[‘’]/g, "'"),
-  );
-
-  const items: Partial<CalendarItem>[] = [];
-  const explicitDuration: boolean[] = [];
-  // Constraints written before any task ("dopo le 15, fare la spesa")
-  let pending: ParsedSegment[] = [];
-
-  for (const segment of cleaned.split(SEGMENT_SEPARATOR)) {
-    if (!segment.trim()) continue;
-    const parsed = parseSegment(segment.trim(), baseDate);
-    const previous = items[items.length - 1];
-
-    if (!parsed.item) {
-      if (previous) {
-        applyWindow(previous, parsed.window);
-        if (parsed.dateString && previous.type === 'flexible') previous.scheduledDate = parsed.dateString;
-      } else {
-        pending.push(parsed);
-      }
-      continue;
-    }
-
-    for (const constraint of pending) {
-      applyWindow(parsed.item, constraint.window);
-      if (constraint.dateString && parsed.item.type === 'flexible') parsed.item.scheduledDate = constraint.dateString;
-    }
-    pending = [];
-    applyWindow(parsed.item, parsed.window);
-    items.push(parsed.item);
-    explicitDuration.push(parsed.explicitDuration);
-  }
-  return { items, explicitDuration, rawText };
-}
-
-/** The task named in the text once the given spans are removed; null if none ("tutto", or nothing left). */
-function extractReference(text: string, matches: Match[]): TaskReference | null {
-  const clean = (part: string) => {
-    let query = part.trim();
-    let previous: string;
-    do {
-      previous = query;
-      query = query
-        .replace(LEADING_CONJUNCTION, '')
-        .replace(REFERENCE_FILLER, '')
-        .replace(LEADING_ARTICLE, '')
-        .trim();
-    } while (query !== previous);
-    return query;
-  };
-  // "mangiare, magari ..." -> the first clause that names something
-  const query = cleanTitle(text, matches).split(/\s*[,;]\s*/).map(clean).find(Boolean);
-  if (!query || ALL_ACTIVITIES.test(query)) {
-    return null;
-  }
-  return { query, category: findCategory(query.toLowerCase()) };
-}
-
-/**
- * Classifies the text as a new task, a longer duration for an existing task,
- * or a delay of an existing task (or of everything that follows).
- * `baseDate` ("YYYY-MM-DD") is the day relative words like "domani" refer to.
- */
-export function parseIntent(text: string, baseDate = toDateString(new Date())): IntentResult {
-  const rawText = text.trim();
-  const normalized = rawText.replace(/[\u2018\u2019]/g, "'");
-  const lower = normalized.toLowerCase();
-  const isDelay = DELAY_PATTERNS.some((pattern) => pattern.test(lower));
-  const isExtend = !isDelay && EXTEND_PATTERNS.some((pattern) => pattern.test(lower));
-  if (!isDelay && !isExtend) {
-    return { intent: 'CREATE_TASK', ...parseInputToTasks(rawText, baseDate) };
-  }
-
-  const matches: Match[] = [];
-  let remaining = lower;
-  const consume = (match: Match | null) => {
-    if (match) {
-      matches.push(match);
-      remaining = blank(remaining, match);
-    }
-  };
-  for (const pattern of isDelay ? DELAY_PATTERNS : EXTEND_PATTERNS) {
-    const match = pattern.exec(remaining);
-    consume(match && { index: match.index, length: match[0].length });
-  }
-  // Only today's agenda can be changed: drop day words from the task name
-  consume(findDate(remaining, baseDate));
-
-  if (isExtend) {
-    const duration = findDuration(remaining);
-    consume(duration);
-    return {
-      intent: 'EXTEND_TASK',
-      target: extractReference(normalized, matches),
-      extraMinutes: duration?.minutes ?? DEFAULT_EXTENSION_MINUTES,
-      rawText,
-    };
-  }
-
-  // The new earliest start is the latest of: an excluded time (+15 min), a window start, other times
-  const minStarts: number[] = [];
-  const excluded = findExcludedTime(remaining, lower);
-  if (excluded) {
-    consume(excluded.match);
-    minStarts.push(excluded.minStartMinutes);
-  }
-  const between = findBetween(remaining, lower);
-  if (between) {
-    consume(between.match);
-    if (between.window.minStartMinutes !== undefined) minStarts.push(between.window.minStartMinutes);
-  }
-  for (const match of [...remaining.matchAll(DELAY_TIME_PATTERN)]) {
-    const clock = parseClock(match[1], lower);
-    if (clock) {
-      minStarts.push(clock.last);
-    }
-    consume({ index: match.index, length: match[0].length });
-  }
-  const minStartMinutes = minStarts.length ? Math.max(...minStarts) : undefined;
-  const duration = minStartMinutes === undefined ? findDuration(remaining) : null;
-  consume(duration);
-  const toTime = (minutes: number | undefined) => (minutes !== undefined ? minutesToTime(minutes) : undefined);
-
+/** A task restated with new details ("mangiare per un'ora", "vado a mangiare tra le 15 e le 17") */
+function statementChanges(slots: TimeSlots): TaskChanges {
+  const times = explicitTimes(slots);
+  const window = statementWindow(slots);
   return {
-    intent: 'RESCHEDULE_DELAY',
-    target: extractReference(normalized, matches),
-    minStartTime: toTime(minStartMinutes),
-    latestStartTime: toTime(between?.window.maxStartMinutes),
-    maxEndTime: toTime(between?.window.maxEndMinutes),
-    delayMinutes: minStartMinutes === undefined ? (duration?.minutes ?? DEFAULT_DELAY_MINUTES) : undefined,
-    negated: NEGATION_PATTERN.test(lower),
-    rawText,
+    newStartTime: toTime(times?.start),
+    newEndTime: toTime(times?.end),
+    newDuration: slots.duration?.minutes,
+    minStartTime: toTime(window.minStartMinutes),
+    latestStartTime: toTime(window.maxStartMinutes),
+    maxEndTime: toTime(window.maxEndMinutes),
   };
 }
 
-/** Meaningful word stems of a task title, with synonyms merged ("mangiare" and "pranzo" are the same) */
-function taskStems(text: string): string[] {
-  const stems = text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .split(/[^a-z0-9]+/)
-    .filter((word) => word.length >= 3)
-    .map((word) => word.slice(0, 5))
-    .filter((stem) => !GENERIC_STEMS.has(stem))
-    .map((stem) => SYNONYM_STEMS[stem] ?? stem);
-  return [...new Set(stems)];
-}
+function buildAction(group: ClauseGroup, tasks: CalendarItem[], date: string, now: Date): ParsedAction | null {
+  const { main } = group;
+  const clauses = main ? [main, ...group.modifiers] : group.modifiers;
+  const cues = mergeCues(clauses);
+  const slots = mergeSlots(clauses);
+  const content = main?.content ?? new Map();
+  const category = main ? findCategory(main.contentWords) : undefined;
+  const query = main ? extractTitle(main) : '';
+  const update = (reason: UpdateReason, target: CalendarItem, changes: TaskChanges): ParsedAction => ({
+    action: 'UPDATE',
+    reason,
+    targetTaskId: target.id,
+    targetTitle: target.title,
+    ...changes,
+  });
 
-export interface TaskMatch {
-  /** Words of the query found in the title */
-  matched: number;
-  queryWords: number;
-  titleWords: number;
-}
+  if (cues.remove) {
+    const targets = main ? findTasks(content, tasks, now) : [];
+    if (!targets.length) return { action: 'UNRESOLVED', query };
+    return { action: 'DELETE', targetTaskIds: (cues.everyMatch ? targets : targets.slice(0, 1)).map(({ id }) => id) };
+  }
 
-/** How many meaningful words a reference ("lo studio") shares with a task title ("Studiare") */
-export function matchTaskWords(query: string, title: string): TaskMatch {
-  const queryStems = taskStems(query);
-  const titleStems = taskStems(title);
-  const matched = queryStems.filter((stem) =>
-    titleStems.some((titleStem) => titleStem.startsWith(stem) || stem.startsWith(titleStem)),
-  ).length;
-  return { matched, queryWords: queryStems.length, titleWords: titleStems.length };
+  if (cues.extend) {
+    const target = main ? findTasks(content, tasks, now, category)[0] : findCurrentTask(tasks, now);
+    if (!target) return { action: 'UNRESOLVED', query };
+    return update('extend', target, { extraMinutes: slots.duration?.minutes ?? DEFAULT_EXTENSION_MINUTES });
+  }
+
+  const bound = delayStart(slots);
+  if (cues.delay || cues.negatedAbility || (cues.arrival && bound !== undefined)) {
+    const changes: TaskChanges =
+      bound !== undefined
+        ? {
+            minStartTime: toTime(bound),
+            latestStartTime: toTime(slots.between?.maxStartMinutes),
+            maxEndTime: toTime(slots.between?.maxEndMinutes),
+          }
+        : { delayMinutes: slots.duration?.minutes ?? DEFAULT_DELAY_MINUTES };
+    if (!main) {
+      return { action: 'SHIFT_ALL', minStartTime: changes.minStartTime, delayMinutes: changes.delayMinutes };
+    }
+    const target = findTasks(content, tasks, now, category)[0];
+    if (target) return update('delay', target, changes);
+    // "non penso di riuscire a fare yoga alle 18" with no yoga planned: a new task with that constraint
+    if (cues.negatedAbility) return buildTask(main, slots, date);
+    return { action: 'UNRESOLVED', query };
+  }
+
+  // Details with nothing to attach to
+  if (!main) return null;
+
+  // The same task already planned is updated, not duplicated
+  const existing = findTasks(content, tasks, now)[0];
+  if (existing && (slots.date ?? date) === date) {
+    return update('statement', existing, statementChanges(slots));
+  }
+  return buildTask(main, slots, date);
 }
 
 /**
- * True if two titles name the same task: all the meaningful words of one appear in the other
- * ("Mangiare" / "Pranzo", but not "Chiamare Marco" / "Chiamare la nonna").
+ * Interprets what the user wrote against the agenda of the day (`currentTasks`):
+ * - CLEAR_ALL when the whole sentence asks to empty the day;
+ * - DELETE / UPDATE when it names a task of the day (by meaning: "vado a mangiare" finds
+ *   "Andare a mangiare a casa"), as a removal, a longer task, a delay or new details;
+ * - SHIFT_ALL for a delay that names no task ("non arrivo prima delle 14:30");
+ * - CREATE only for actions not in the agenda.
+ * Secondary clauses ("posso andarci tra le 15 e le 17", text in brackets) add constraints to the
+ * main clause instead of becoming tasks. One action per main clause.
  */
-export function isSameTask(titleA: string, titleB: string): boolean {
-  const { matched, queryWords, titleWords } = matchTaskWords(titleA, titleB);
-  return matched > 0 && (matched === queryWords || matched === titleWords);
+export function parseUserInput(text: string, currentTasks: CalendarItem[], options: ParseOptions = {}): ParseResult {
+  const now = options.now ?? new Date();
+  const date = options.date ?? toDateString(now);
+  const rawText = text.trim();
+
+  if (detectCues(tokenize(rawText).map((token) => token.word)).clearAll) {
+    return { rawText, actions: [{ action: 'CLEAR_ALL' }] };
+  }
+
+  const clauses = splitClauses(rawText).map((clause) => analyzeClause(clause, date));
+  const actions = groupClauses(clauses)
+    .map((group) => buildAction(group, currentTasks, date, now))
+    .filter((action): action is ParsedAction => action !== null);
+  return { rawText, actions };
 }
