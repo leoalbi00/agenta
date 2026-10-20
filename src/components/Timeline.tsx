@@ -1,8 +1,9 @@
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { Pressable, ScrollView, type ScrollViewInstance, Text, View } from 'react-native';
 
 import type { CalendarItem } from '../types';
 import { getItemTimeRange } from '../utils/items';
-import { formatDuration, minutesFromDayStart, minutesToTime, timeToMinutes } from '../utils/time';
+import { formatDuration, minutesFromDayStart, minutesToTime, timeToMinutes, toDateString } from '../utils/time';
 import { TaskCard } from './TaskCard';
 
 const HOUR_HEIGHT = 96;
@@ -13,6 +14,8 @@ const COMPACT_CARD_HEIGHT = 64;
 /** Vertical space between consecutive cards */
 const CARD_GAP = 4;
 const LABEL_WIDTH = 56;
+/** When showing today, the timeline opens with this much of the past above the current time */
+const SCROLL_CONTEXT_MINUTES = 60;
 /** Minutes covered by a card of minimum height: closer items are laid out side by side */
 const MIN_CARD_MINUTES = (MIN_CARD_HEIGHT / HOUR_HEIGHT) * 60;
 
@@ -85,9 +88,35 @@ function layoutItems(items: CalendarItem[], date: string, dayStartMinutes: numbe
   return positioned;
 }
 
+/** Minutes since midnight, updated every minute */
+function useCurrentMinutes(): number {
+  const read = () => {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  };
+  const [minutes, setMinutes] = useState(read);
+  useEffect(() => {
+    const timer = setInterval(() => setMinutes(read()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+  return minutes;
+}
+
 export function Timeline({ items, date, dayStart = '08:00', dayEnd = '22:00', onItemPress }: TimelineProps) {
   const dayStartMinutes = timeToMinutes(dayStart);
   const dayEndMinutes = timeToMinutes(dayEnd);
+  const scrollRef = useRef<ScrollViewInstance>(null);
+  const nowMinutes = useCurrentMinutes();
+  const isToday = date === toDateString(new Date());
+  const showNow = isToday && nowMinutes >= dayStartMinutes && nowMinutes <= dayEndMinutes;
+
+  // Open today's timeline at the current time
+  useEffect(() => {
+    if (!isToday) return;
+    const minutes = Math.max(nowMinutes - SCROLL_CONTEXT_MINUTES - dayStartMinutes, 0);
+    scrollRef.current?.scrollTo({ y: (minutes / 60) * HOUR_HEIGHT, animated: false });
+    // Only when the day changes, not every minute
+  }, [date]);
   const hours = Array.from(
     { length: Math.floor((dayEndMinutes - dayStartMinutes) / 60) + 1 },
     (_, index) => dayStartMinutes + index * 60,
@@ -118,7 +147,7 @@ export function Timeline({ items, date, dayStart = '08:00', dayEnd = '22:00', on
         </View>
       )}
 
-      <ScrollView contentContainerClassName="px-4 pb-6 pt-3">
+      <ScrollView ref={scrollRef} contentContainerClassName="px-4 pb-6 pt-3">
         <View style={{ height: (hours.length - 1) * HOUR_HEIGHT + 16 }}>
           {hours.map((minutes, index) => (
             <View
@@ -151,6 +180,17 @@ export function Timeline({ items, date, dayStart = '08:00', dayEnd = '22:00', on
               </View>
             ))}
           </View>
+
+          {showNow && (
+            <View
+              pointerEvents="none"
+              className="absolute right-0 flex-row items-center"
+              style={{ top: ((nowMinutes - dayStartMinutes) / 60) * HOUR_HEIGHT - 4, left: LABEL_WIDTH - 4 }}
+            >
+              <View className="h-2 w-2 rounded-full bg-red-500" />
+              <View className="h-0.5 flex-1 bg-red-500" />
+            </View>
+          )}
         </View>
       </ScrollView>
     </View>

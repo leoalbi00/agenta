@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
+    <!-- viewport-fit=cover exposes the iPhone safe areas (Dynamic Island, home indicator) as env() insets -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>agenta</title>
+
+    <!-- Added to the Home Screen, it opens full screen like a native app -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="agenta" />
+    <meta name="theme-color" content="#f8fafc" />
+    <meta name="format-detection" content="telephone=no" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- The `react-native-web` recommended style reset: https://necolas.github.io/react-native-web/docs/setup/#root-element -->
+    <style id="expo-reset">
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background-color: #f8fafc;
+      }
+      body {
+        /* The app scrolls inside its ScrollViews, never the page */
+        overflow: hidden;
+        overscroll-behavior: none;
+        -webkit-text-size-adjust: 100%;
+        -webkit-tap-highlight-color: transparent;
+        /* No double-tap zoom on buttons */
+        touch-action: manipulation;
+        /* Long press on a card doesn't select text or open the callout */
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+      }
+      input,
+      textarea {
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #root {
+        display: flex;
+        flex: 1;
+        /* The visible area: shrinks with Safari's toolbars and the keyboard (see script below) */
+        height: 100%;
+        height: 100dvh;
+        height: var(--app-height, 100dvh);
+      }
+    </style>
+  </head>
+
+  <body>
+    <noscript> You need to enable JavaScript to run this app. </noscript>
+    <div id="root"></div>
+    <script>
+      // iOS Safari doesn't resize the page when the keyboard opens, it pans it, pushing the
+      // header off screen. Sizing the app to the visual viewport keeps the input bar right
+      // above the keyboard and the rest of the layout in place.
+      (function () {
+        var viewport = window.visualViewport;
+        function update() {
+          var height = viewport ? viewport.height : window.innerHeight;
+          document.documentElement.style.setProperty('--app-height', height + 'px');
+          if (window.scrollY !== 0) window.scrollTo(0, 0);
+        }
+        if (viewport) {
+          viewport.addEventListener('resize', update);
+          viewport.addEventListener('scroll', update);
+        }
+        window.addEventListener('resize', update);
+        update();
+      })();
+    </script>
+  </body>
+</html>

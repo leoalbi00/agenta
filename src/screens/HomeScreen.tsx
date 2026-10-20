@@ -1,7 +1,7 @@
 import { Mic, SendHorizontal, TriangleAlert, X } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, Text, TextInput, type TextInputInstance, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ApprovalModal } from '../components/ApprovalModal';
 import { ItemActionsModal } from '../components/ItemActionsModal';
@@ -11,6 +11,7 @@ import { deleteItem, getItemsByDate, saveItems, updateItemStatus } from '../serv
 import type { CalendarItem } from '../types';
 import { getItemTimeRange, occursOnDate } from '../utils/items';
 import { parseDateString, toDateString } from '../utils/time';
+import { useKeyboardVisible } from '../utils/useKeyboardVisible';
 
 export function HomeScreen() {
   const [date] = useState(() => toDateString(new Date()));
@@ -25,6 +26,8 @@ export function HomeScreen() {
   // Shown above the input bar (Alert.alert does nothing on the web)
   const [message, setMessage] = useState<string | null>(null);
   const inputRef = useRef<TextInputInstance>(null);
+  const insets = useSafeAreaInsets();
+  const keyboardVisible = useKeyboardVisible();
 
   const loadItems = useCallback(async () => {
     try {
@@ -124,7 +127,8 @@ export function HomeScreen() {
   });
 
   return (
-    <SafeAreaView className="flex-1 bg-slate-50" edges={['top', 'bottom']}>
+    // The input bar handles the bottom inset itself, so its white background reaches the screen edge
+    <SafeAreaView className="flex-1 bg-slate-50" edges={['top']}>
       <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View className="px-4 pb-3 pt-2">
           <Text className="text-sm font-medium capitalize text-slate-500">{dateLabel}</Text>
@@ -143,7 +147,11 @@ export function HomeScreen() {
           </View>
         )}
 
-        <View className="flex-row items-center gap-2 border-t border-slate-200 bg-white px-3 py-2">
+        <View
+          className="flex-row items-center gap-2 border-t border-slate-200 bg-white px-3 pt-2"
+          // Above the home indicator, or right above the keyboard when it's open
+          style={{ paddingBottom: keyboardVisible ? 8 : insets.bottom + 8 }}
+        >
           <Pressable
             onPress={handleMicPress}
             accessibilityLabel="Dettatura vocale"
@@ -159,7 +167,7 @@ export function HomeScreen() {
             placeholder="Es. riunione dalle 10 alle 11, studiare per 2 ore"
             placeholderTextColor="#94a3b8"
             returnKeyType="send"
-            className="flex-1 rounded-full bg-slate-100 px-4 py-3 text-base text-slate-900"
+            className="flex-1 rounded-full bg-slate-100 px-4 py-3 text-base text-slate-900 outline-none"
           />
           <Pressable
             onPress={handleSubmit}
