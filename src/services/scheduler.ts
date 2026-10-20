@@ -26,7 +26,7 @@ export interface FreeGap {
 export interface FitResult {
   /** Tasks placed in the day, with proposed times and status 'proposed' */
   scheduled: CalendarItem[];
-  /** Tasks that didn't fit (no free gap large enough, or missing estimatedMinutes) */
+  /** Tasks that didn't fit (no free gap large enough within their time window, or missing estimatedMinutes) */
   unscheduled: CalendarItem[];
   /** The day's grid after placement */
   slots: DailySlot[];
@@ -80,8 +80,21 @@ export function findFreeGaps(slots: DailySlot[]): FreeGap[] {
   return gaps;
 }
 
+/** Earliest start inside a free gap such that the task fits in the gap and in [minStart, maxEnd]. */
+function findStart(gaps: FreeGap[], duration: number, minStart: number, maxEnd: number): number | null {
+  for (const gap of gaps) {
+    const start = Math.max(timeToMinutes(gap.startTime), minStart);
+    const end = start + duration;
+    if (end <= timeToMinutes(gap.endTime) && end <= maxEnd) {
+      return start;
+    }
+  }
+  return null;
+}
+
 /**
- * Places flexible tasks, in the given order, in the first free gap long enough for them.
+ * Places flexible tasks, in the given order, at the earliest free time long enough for them
+ * that respects their `minStartTime` / `maxEndTime` window.
  * Fixed events and flexible tasks that already have proposed times block their slots.
  */
 export function fitFlexibleTasks(
@@ -109,20 +122,28 @@ export function fitFlexibleTasks(
     }
   }
 
+  const gridStart = timeToMinutes(dayStart);
+  const alignToGrid = (minutes: number) =>
+    gridStart + Math.ceil((minutes - gridStart) / intervalMinutes) * intervalMinutes;
+
   const scheduled: CalendarItem[] = [];
   const unscheduled: CalendarItem[] = [];
 
   for (const task of newTasks) {
     const duration = task.estimatedMinutes;
-    const gap =
+    const start =
       task.type === 'flexible' && duration && duration > 0
-        ? findFreeGaps(slots).find((freeGap) => freeGap.durationMinutes >= duration)
-        : undefined;
-    if (!gap || !duration) {
+        ? findStart(
+            findFreeGaps(slots),
+            duration,
+            task.minStartTime ? alignToGrid(timeToMinutes(task.minStartTime)) : -Infinity,
+            task.maxEndTime ? timeToMinutes(task.maxEndTime) : Infinity,
+          )
+        : null;
+    if (start === null || !duration) {
       unscheduled.push(task);
       continue;
     }
-    const start = timeToMinutes(gap.startTime);
     markOccupied(slots, start, start + duration, task.id);
     scheduled.push({
       ...task,

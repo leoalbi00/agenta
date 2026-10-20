@@ -5,10 +5,16 @@ import { getItemTimeRange } from '../utils/items';
 import { formatDuration, minutesFromDayStart, minutesToTime, timeToMinutes } from '../utils/time';
 import { TaskCard } from './TaskCard';
 
-const HOUR_HEIGHT = 72;
-const MIN_CARD_HEIGHT = 30;
-const COMPACT_CARD_HEIGHT = 52;
+const HOUR_HEIGHT = 96;
+/** Smallest readable card: a single line with title and time */
+const MIN_CARD_HEIGHT = 44;
+/** Below this height cards switch to the single-line layout */
+const COMPACT_CARD_HEIGHT = 64;
+/** Vertical space between consecutive cards */
+const CARD_GAP = 4;
 const LABEL_WIDTH = 56;
+/** Minutes covered by a card of minimum height: closer items are laid out side by side */
+const MIN_CARD_MINUTES = (MIN_CARD_HEIGHT / HOUR_HEIGHT) * 60;
 
 interface TimelineProps {
   items: CalendarItem[];
@@ -27,7 +33,10 @@ interface PositionedItem {
   lanes: number;
 }
 
-/** Positions timed items on the grid; overlapping items share the width side by side. */
+/**
+ * Positions timed items on the grid. Items that overlap on screen (also because short items
+ * are drawn taller than their duration) share the width side by side instead of covering each other.
+ */
 function layoutItems(items: CalendarItem[], date: string, dayStartMinutes: number, dayEndMinutes: number) {
   const clamp = (minutes: number) => Math.min(Math.max(minutes, dayStartMinutes), dayEndMinutes);
   const timed = items
@@ -36,7 +45,9 @@ function layoutItems(items: CalendarItem[], date: string, dayStartMinutes: numbe
       if (!range) return [];
       const start = clamp(minutesFromDayStart(range.start, date));
       const end = clamp(minutesFromDayStart(range.end, date));
-      return end > start ? [{ item, start, end }] : [];
+      // How far down the card reaches on screen, which can be past its real end
+      const visualEnd = Math.max(end, start + MIN_CARD_MINUTES);
+      return end > start ? [{ item, start, end, visualEnd }] : [];
     })
     .sort((a, b) => a.start - b.start || b.end - a.end);
 
@@ -46,7 +57,7 @@ function layoutItems(items: CalendarItem[], date: string, dayStartMinutes: numbe
   let laneEnds: number[] = [];
   const closeCluster = () => cluster.forEach((entry) => (entry.lanes = laneEnds.length));
 
-  for (const { item, start, end } of timed) {
+  for (const { item, start, end, visualEnd } of timed) {
     if (start >= clusterEnd) {
       closeCluster();
       cluster = [];
@@ -55,9 +66,9 @@ function layoutItems(items: CalendarItem[], date: string, dayStartMinutes: numbe
     let lane = laneEnds.findIndex((laneEnd) => laneEnd <= start);
     if (lane === -1) {
       lane = laneEnds.length;
-      laneEnds.push(end);
+      laneEnds.push(visualEnd);
     } else {
-      laneEnds[lane] = end;
+      laneEnds[lane] = visualEnd;
     }
     const entry: PositionedItem = {
       item,
@@ -68,7 +79,7 @@ function layoutItems(items: CalendarItem[], date: string, dayStartMinutes: numbe
     };
     cluster.push(entry);
     positioned.push(entry);
-    clusterEnd = Math.max(clusterEnd, end);
+    clusterEnd = Math.max(clusterEnd, visualEnd);
   }
   closeCluster();
   return positioned;
@@ -121,10 +132,17 @@ export function Timeline({ items, date, dayStart = '08:00', dayEnd = '22:00', on
             {positioned.map(({ item, top, height, lane, lanes }) => (
               <View
                 key={item.id}
-                className="absolute p-0.5"
+                className="absolute px-0.5"
                 style={{ top, height, left: `${(lane / lanes) * 100}%`, width: `${100 / lanes}%` }}
               >
-                <TaskCard item={item} compact={height < COMPACT_CARD_HEIGHT} onPress={onItemPress} />
+                <View className="flex-1" style={{ marginBottom: CARD_GAP }}>
+                  <TaskCard
+                    item={item}
+                    compact={height < COMPACT_CARD_HEIGHT}
+                    narrow={lanes > 1}
+                    onPress={onItemPress}
+                  />
+                </View>
               </View>
             ))}
           </View>

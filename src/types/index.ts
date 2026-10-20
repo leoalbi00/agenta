@@ -24,6 +24,10 @@ export interface CalendarItem {
   proposedStartTime?: string;
   /** ISO 8601 datetime proposed by the scheduler, only for flexible tasks */
   proposedEndTime?: string;
+  /** "HH:mm": a flexible task can't be scheduled before this time ("dopo le 15") */
+  minStartTime?: string;
+  /** "HH:mm": a flexible task must end by this time ("prima delle 18") */
+  maxEndTime?: string;
   status: CalendarItemStatus;
   actualDurationMinutes?: number;
   /** ISO 8601 datetime */

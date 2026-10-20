@@ -33,3 +33,11 @@ export function compareByStartTime(a: CalendarItem, b: CalendarItem): number {
   }
   return new Date(startA).getTime() - new Date(startB).getTime();
 }
+
+/** "dopo le 15:00", "entro le 18:00", "tra le 15:00 e le 18:00", or null without constraints */
+export function formatTimeWindow({ minStartTime, maxEndTime }: CalendarItem): string | null {
+  if (minStartTime && maxEndTime) return `tra le ${minStartTime} e le ${maxEndTime}`;
+  if (minStartTime) return `dopo le ${minStartTime}`;
+  if (maxEndTime) return `entro le ${maxEndTime}`;
+  return null;
+}

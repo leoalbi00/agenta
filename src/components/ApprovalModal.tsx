@@ -3,7 +3,7 @@ import { ActivityIndicator, Modal, Pressable, ScrollView, Text, View } from 'rea
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { CalendarItem } from '../types';
-import { getItemTimeRange } from '../utils/items';
+import { formatTimeWindow, getItemTimeRange } from '../utils/items';
 import { CATEGORY_LABELS } from '../utils/labels';
 import { formatDayLabel, formatDuration, formatTimeOfDay } from '../utils/time';
 
@@ -24,6 +24,7 @@ function ProposalRow({ item }: { item: CalendarItem }) {
   const range = getItemTimeRange(item);
   const isFixed = item.type === 'fixed';
   const durationMinutes = item.estimatedMinutes ?? 0;
+  const timeWindow = formatTimeWindow(item);
 
   return (
     <View
@@ -48,6 +49,7 @@ function ProposalRow({ item }: { item: CalendarItem }) {
         {isFixed
           ? "Orario indicato da te"
           : `Primo slot libero da ${formatDuration(durationMinutes)} trovato dallo scheduler`}
+        {timeWindow && ` · ${timeWindow}`}
       </Text>
     </View>
   );
@@ -66,8 +68,8 @@ export function ApprovalModal({
   const canAccept = items.length > 0 && !saving;
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
-      <View className="flex-1 justify-end bg-black/20">
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <View className="flex-1 justify-end bg-black/50">
         <Pressable className="flex-1" onPress={onCancel} disabled={saving} />
         <View className="rounded-t-3xl bg-white px-5 pt-5" style={{ paddingBottom: insets.bottom + 16 }}>
           <View className="mb-4 flex-row items-center gap-2">
@@ -95,6 +97,7 @@ export function ApprovalModal({
                   <Text key={item.id} className="text-sm text-amber-800">
                     • {item.title}
                     {item.estimatedMinutes ? ` (${formatDuration(item.estimatedMinutes)})` : ''}
+                    {formatTimeWindow(item) ? `, ${formatTimeWindow(item)}` : ''}
                   </Text>
                 ))}
                 <Text className="mt-1 text-xs text-amber-700">Questi task non verranno salvati.</Text>
