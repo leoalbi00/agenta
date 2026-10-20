@@ -1,51 +1,31 @@
-import { Mic, SendHorizontal } from 'lucide-react-native';
+import { Mic, SendHorizontal, TriangleAlert, X } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, KeyboardAvoidingView, Platform, Pressable, Text, TextInput, type TextInputInstance, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, Text, TextInput, type TextInputInstance, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ApprovalModal } from '../components/ApprovalModal';
 import { Timeline } from '../components/Timeline';
-import { parseInputToTasks } from '../services/nlp';
-import { fitFlexibleTasks } from '../services/scheduler';
+import { type AgendaProposal, planInput } from '../services/agenda';
 import { getItemsByDate, saveItems, updateItemStatus } from '../services/storage';
 import type { CalendarItem } from '../types';
-import { generateId } from '../utils/id';
-import { compareByStartTime, occursOnDate } from '../utils/items';
-import { minutesToTime, parseDateString, toDateString } from '../utils/time';
-
-const SCHEDULER_INTERVAL_MINUTES = 15;
-
-interface Proposal {
-  rawText: string;
-  items: CalendarItem[];
-  unscheduled: CalendarItem[];
-}
-
-/** The day a draft belongs to: fixed events by their start, flexible tasks by their planned day. */
-function getDraftDate(item: CalendarItem, fallback: string): string {
-  return item.type === 'fixed' && item.fixedStartTime ? item.fixedStartTime.slice(0, 10) : (item.scheduledDate ?? fallback);
-}
-
-/** Now, rounded up to the scheduler grid, so tasks aren't proposed in the past. */
-function getEarliestStartToday(): string {
-  const now = new Date();
-  const minutes = now.getHours() * 60 + now.getMinutes();
-  return minutesToTime(Math.ceil(minutes / SCHEDULER_INTERVAL_MINUTES) * SCHEDULER_INTERVAL_MINUTES);
-}
+import { occursOnDate } from '../utils/items';
+import { parseDateString, toDateString } from '../utils/time';
 
 export function HomeScreen() {
   const [date] = useState(() => toDateString(new Date()));
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [input, setInput] = useState('');
-  const [proposal, setProposal] = useState<Proposal | null>(null);
+  const [proposal, setProposal] = useState<AgendaProposal | null>(null);
   const [saving, setSaving] = useState(false);
+  // Shown above the input bar (Alert.alert does nothing on the web)
+  const [message, setMessage] = useState<string | null>(null);
   const inputRef = useRef<TextInputInstance>(null);
 
   const loadItems = useCallback(async () => {
     try {
       setItems(await getItemsByDate(date));
     } catch {
-      Alert.alert('Errore', 'Impossibile caricare gli impegni salvati.');
+      setMessage('Impossibile caricare gli impegni salvati.');
     }
   }, [date]);
 
@@ -57,43 +37,16 @@ export function HomeScreen() {
     const text = input.trim();
     if (!text) return;
 
-    const parsed = parseInputToTasks(text, date);
-    const createdAt = new Date().toISOString();
-    const drafts: CalendarItem[] = parsed.items.map((draft) => ({
-      title: 'Nuovo impegno',
-      type: 'flexible',
-      category: 'personal',
-      ...draft,
-      id: generateId(),
-      status: 'proposed',
-      createdAt,
-    }));
-
+    setMessage(null);
     try {
-      const proposed: CalendarItem[] = [];
-      const unscheduled: CalendarItem[] = [];
-      const draftDates = [...new Set(drafts.map((draft) => getDraftDate(draft, date)))];
-
-      for (const draftDate of draftDates) {
-        const dayDrafts = drafts.filter((draft) => getDraftDate(draft, date) === draftDate);
-        const fixed = dayDrafts.filter((draft) => draft.type === 'fixed');
-        const existing = draftDate === date ? items : await getItemsByDate(draftDate);
-        const result = fitFlexibleTasks(
-          [...existing, ...fixed],
-          dayDrafts.filter((draft) => draft.type === 'flexible'),
-          draftDate,
-          {
-            intervalMinutes: SCHEDULER_INTERVAL_MINUTES,
-            earliestStartTime: draftDate === toDateString(new Date()) ? getEarliestStartToday() : undefined,
-          },
-        );
-        proposed.push(...fixed, ...result.scheduled);
-        unscheduled.push(...result.unscheduled);
+      const result = await planInput(text, date, items);
+      if ('error' in result) {
+        setMessage(result.error);
+        return;
       }
-
-      setProposal({ rawText: parsed.rawText, items: proposed.sort(compareByStartTime), unscheduled });
+      setProposal(result.proposal);
     } catch {
-      Alert.alert('Errore', 'Impossibile calcolare la proposta.');
+      setMessage('Impossibile calcolare la proposta.');
     }
   };
 
@@ -101,12 +54,14 @@ export function HomeScreen() {
     if (!proposal) return;
     setSaving(true);
     try {
-      await saveItems(proposal.items.map((item) => ({ ...item, status: 'confirmed' })));
+      await saveItems(
+        proposal.items.map((item) => (item.status === 'proposed' ? { ...item, status: 'confirmed' } : item)),
+      );
       setProposal(null);
       setInput('');
       await loadItems();
     } catch {
-      Alert.alert('Errore', 'Impossibile salvare gli impegni.');
+      setMessage('Impossibile salvare gli impegni.');
     } finally {
       setSaving(false);
     }
@@ -117,22 +72,21 @@ export function HomeScreen() {
       await updateItemStatus(item.id, item.status === 'completed' ? 'confirmed' : 'completed');
       await loadItems();
     } catch {
-      Alert.alert('Errore', "Impossibile aggiornare l'impegno.");
+      setMessage("Impossibile aggiornare l'impegno.");
     }
   };
 
   const handleMicPress = () => {
     inputRef.current?.focus();
-    Alert.alert(
-      'Dettatura vocale',
-      'Il riconoscimento vocale integrato non è ancora disponibile: usa il microfono della tastiera iOS.',
-    );
+    setMessage('Il riconoscimento vocale integrato non è ancora disponibile: usa il microfono della tastiera iOS.');
   };
 
-  // While the modal is open, proposals for this day are previewed in the timeline
+  // While the modal is open, the proposal for this day is previewed in the timeline
   const timelineItems = useMemo(() => {
-    const previews = proposal?.items.filter((item) => occursOnDate(item, date)) ?? [];
-    return [...items, ...previews];
+    if (!proposal) return items;
+    const changedIds = new Set(proposal.items.map((item) => item.id));
+    const previews = proposal.items.filter((item) => occursOnDate(item, date));
+    return [...items.filter((item) => !changedIds.has(item.id)), ...previews];
   }, [items, proposal, date]);
 
   const dateLabel = parseDateString(date).toLocaleDateString('it-IT', {
@@ -150,6 +104,16 @@ export function HomeScreen() {
         </View>
 
         <Timeline items={timelineItems} date={date} onItemPress={proposal ? undefined : handleItemPress} />
+
+        {message && (
+          <View className="mx-3 mb-2 flex-row items-start gap-2 rounded-2xl bg-amber-50 p-3">
+            <TriangleAlert color="#b45309" size={16} />
+            <Text className="flex-1 text-sm text-amber-800">{message}</Text>
+            <Pressable onPress={() => setMessage(null)} accessibilityLabel="Chiudi" hitSlop={8}>
+              <X color="#b45309" size={16} />
+            </Pressable>
+          </View>
+        )}
 
         <View className="flex-row items-center gap-2 border-t border-slate-200 bg-white px-3 py-2">
           <Pressable
@@ -185,6 +149,8 @@ export function HomeScreen() {
         rawText={proposal?.rawText ?? ''}
         items={proposal?.items ?? []}
         unscheduled={proposal?.unscheduled ?? []}
+        changes={proposal?.changes ?? []}
+        notice={proposal?.notice}
         saving={saving}
         onAccept={handleAccept}
         onCancel={() => setProposal(null)}

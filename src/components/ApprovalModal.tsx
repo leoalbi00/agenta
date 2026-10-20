@@ -1,7 +1,8 @@
-import { Clock, Sparkles, TriangleAlert } from 'lucide-react-native';
+import { ArrowRightLeft, Clock, Info, Sparkles, TriangleAlert } from 'lucide-react-native';
 import { ActivityIndicator, Modal, Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import type { AgendaChange } from '../services/agenda';
 import type { CalendarItem } from '../types';
 import { formatTimeWindow, getItemTimeRange } from '../utils/items';
 import { CATEGORY_LABELS } from '../utils/labels';
@@ -15,6 +16,9 @@ interface ApprovalModalProps {
   items: CalendarItem[];
   /** Flexible tasks the scheduler couldn't fit: they are not saved */
   unscheduled: CalendarItem[];
+  /** Changes to the existing agenda; when present they replace the list of items */
+  changes?: AgendaChange[];
+  notice?: string;
   saving?: boolean;
   onAccept: () => void;
   onCancel: () => void;
@@ -55,11 +59,40 @@ function ProposalRow({ item }: { item: CalendarItem }) {
   );
 }
 
+function describeChange({ kind, item, minutes }: AgendaChange): string {
+  const range = getItemTimeRange(item);
+  const start = range ? formatTimeOfDay(range.start) : '';
+  switch (kind) {
+    case 'moved':
+      return `Riorganizzazione agenda: ${item.title} spostato alle ${start}`;
+    case 'extended':
+      return `${item.title} allungato di ${formatDuration(minutes ?? 0)}: ora ${start} – ${range ? formatTimeOfDay(range.end) : ''}`;
+    case 'unscheduled':
+      return `${item.title} non entra più nella giornata: torna tra i task da pianificare`;
+    case 'conflict':
+      return `${item.title} è un evento fisso alle ${start}: non lo sposto automaticamente`;
+  }
+}
+
+function ChangeRow({ change }: { change: AgendaChange }) {
+  const isWarning = change.kind === 'unscheduled' || change.kind === 'conflict';
+  return (
+    <View className={`mb-2 flex-row items-start gap-2 rounded-2xl p-3 ${isWarning ? 'bg-amber-50' : 'bg-violet-50'}`}>
+      {isWarning ? <TriangleAlert color="#b45309" size={16} /> : <ArrowRightLeft color="#6d28d9" size={16} />}
+      <Text className={`flex-1 text-sm font-medium ${isWarning ? 'text-amber-800' : 'text-violet-900'}`}>
+        {describeChange(change)}
+      </Text>
+    </View>
+  );
+}
+
 export function ApprovalModal({
   visible,
   rawText,
   items,
   unscheduled,
+  changes = [],
+  notice,
   saving = false,
   onAccept,
   onCancel,
@@ -74,7 +107,9 @@ export function ApprovalModal({
         <View className="rounded-t-3xl bg-white px-5 pt-5" style={{ paddingBottom: insets.bottom + 16 }}>
           <View className="mb-4 flex-row items-center gap-2">
             <Sparkles color="#4f46e5" size={20} />
-            <Text className="text-lg font-bold text-slate-900">Proposta dell'agenda</Text>
+            <Text className="text-lg font-bold text-slate-900">
+              {changes.length ? 'Riorganizzazione agenda' : "Proposta dell'agenda"}
+            </Text>
           </View>
 
           <Text className="mb-1 text-xs font-semibold uppercase text-slate-400">Hai scritto</Text>
@@ -83,9 +118,15 @@ export function ApprovalModal({
           </View>
 
           <ScrollView style={{ maxHeight: 320 }}>
-            {items.map((item) => (
-              <ProposalRow key={item.id} item={item} />
-            ))}
+            {notice && (
+              <View className="mb-2 flex-row items-start gap-2 rounded-2xl bg-slate-100 p-3">
+                <Info color="#475569" size={16} />
+                <Text className="flex-1 text-sm text-slate-700">{notice}</Text>
+              </View>
+            )}
+            {changes.length
+              ? changes.map((change) => <ChangeRow key={`${change.kind}-${change.item.id}`} change={change} />)
+              : items.map((item) => <ProposalRow key={item.id} item={item} />)}
 
             {unscheduled.length > 0 && (
               <View className="mb-2 rounded-2xl bg-amber-50 p-3">

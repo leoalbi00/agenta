@@ -67,3 +67,8 @@ export function formatDayLabel(dateString: string, today = toDateString(new Date
     month: 'short',
   });
 }
+
+/** Adds minutes to an ISO datetime, returning a local ISO datetime */
+export function addMinutesToISO(isoDateTime: string, minutes: number): string {
+  return toLocalISO(new Date(new Date(isoDateTime).getTime() + minutes * 60000));
+}
