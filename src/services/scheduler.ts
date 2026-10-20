@@ -32,8 +32,15 @@ export interface FitResult {
   slots: DailySlot[];
 }
 
+export interface ReflowOptions extends SchedulerOptions {
+  /** Items that keep their current times, even if flexible */
+  pinnedIds?: string[];
+  /** Fixed events that may be pushed forward too (only when the user agreed to it) */
+  movableFixedIds?: string[];
+}
+
 export interface ReflowResult {
-  /** Flexible tasks whose times changed, with the new proposed times */
+  /** Tasks whose times changed: proposed times for flexible tasks, fixed times for fixed events */
   moved: CalendarItem[];
   /** Flexible tasks that no longer fit in the day */
   unscheduled: CalendarItem[];
@@ -79,7 +86,7 @@ function isFree(slots: DailySlot[], startMinutes: number, endMinutes: number): b
 }
 
 /** Rounds minutes up to the next slot boundary of a grid starting at `dayStart`. */
-function alignToGrid(minutes: number, dayStart: string, intervalMinutes: number): number {
+export function alignToGrid(minutes: number, dayStart: string, intervalMinutes: number): number {
   const gridStart = timeToMinutes(dayStart);
   return gridStart + Math.ceil((minutes - gridStart) / intervalMinutes) * intervalMinutes;
 }
@@ -180,15 +187,22 @@ export function fitFlexibleTasks(
 }
 
 /**
- * Re-places the day's flexible tasks after a change (an event extended or moved, a new `minStartTime`).
- * Fixed events, in-progress/completed tasks and tasks before `earliestStartTime` stay where they are.
- * The other flexible tasks, in their current order, keep their time if it's still free and inside
- * their window; otherwise they're pushed forward to the first free time that fits.
+ * Re-places the day's tasks after a change (an event extended or moved, a new `minStartTime`).
+ * Pinned items, fixed events (unless in `movableFixedIds`), in-progress/completed tasks and tasks before
+ * `earliestStartTime` stay where they are. The other tasks, in their current order, keep their time
+ * if it's still free and inside their window; otherwise they're pushed forward to the first free time that fits.
  */
 export function reflowDay(
   items: CalendarItem[],
   dateString: string,
-  { dayStart = '08:00', dayEnd = '22:00', intervalMinutes = 15, earliestStartTime }: SchedulerOptions = {},
+  {
+    dayStart = '08:00',
+    dayEnd = '22:00',
+    intervalMinutes = 15,
+    earliestStartTime,
+    pinnedIds = [],
+    movableFixedIds = [],
+  }: ReflowOptions = {},
 ): ReflowResult {
   const slots = generateTimeSlots(dayStart, dayEnd, intervalMinutes);
   const earliest = earliestStartTime ? timeToMinutes(earliestStartTime) : -Infinity;
@@ -203,7 +217,10 @@ export function reflowDay(
       : [];
   });
   const isMovable = ({ item, start }: (typeof timed)[number]) =>
-    item.type === 'flexible' && MOVABLE_STATUSES.includes(item.status) && start >= earliest;
+    (item.type === 'flexible' || movableFixedIds.includes(item.id)) &&
+    MOVABLE_STATUSES.includes(item.status) &&
+    !pinnedIds.includes(item.id) &&
+    start >= earliest;
 
   for (const entry of timed) {
     if (!isMovable(entry)) {
@@ -215,7 +232,7 @@ export function reflowDay(
   const unscheduled: CalendarItem[] = [];
 
   for (const { item, start, end } of timed.filter(isMovable).sort((a, b) => a.start - b.start)) {
-    const duration = item.estimatedMinutes ?? end - start;
+    const duration = item.type === 'flexible' ? (item.estimatedMinutes ?? end - start) : end - start;
     const minStart = item.minStartTime
       ? alignToGrid(timeToMinutes(item.minStartTime), dayStart, intervalMinutes)
       : -Infinity;
@@ -235,11 +252,17 @@ export function reflowDay(
     }
     markOccupied(slots, newStart, newStart + duration, item.id);
     if (newStart !== start || newStart + duration !== end) {
-      moved.push({
-        ...item,
-        proposedStartTime: combineDateAndMinutes(dateString, newStart),
-        proposedEndTime: combineDateAndMinutes(dateString, newStart + duration),
-      });
+      const newTimes =
+        item.type === 'fixed'
+          ? {
+              fixedStartTime: combineDateAndMinutes(dateString, newStart),
+              fixedEndTime: combineDateAndMinutes(dateString, newStart + duration),
+            }
+          : {
+              proposedStartTime: combineDateAndMinutes(dateString, newStart),
+              proposedEndTime: combineDateAndMinutes(dateString, newStart + duration),
+            };
+      moved.push({ ...item, ...newTimes });
     }
   }
 

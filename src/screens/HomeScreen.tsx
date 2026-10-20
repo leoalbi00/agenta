@@ -17,6 +17,7 @@ export function HomeScreen() {
   const [input, setInput] = useState('');
   const [proposal, setProposal] = useState<AgendaProposal | null>(null);
   const [saving, setSaving] = useState(false);
+  const [cascadeAccepted, setCascadeAccepted] = useState(false);
   // Shown above the input bar (Alert.alert does nothing on the web)
   const [message, setMessage] = useState<string | null>(null);
   const inputRef = useRef<TextInputInstance>(null);
@@ -44,18 +45,25 @@ export function HomeScreen() {
         setMessage(result.error);
         return;
       }
+      setCascadeAccepted(false);
       setProposal(result.proposal);
     } catch {
       setMessage('Impossibile calcolare la proposta.');
     }
   };
 
+  // The proposal's items plus, if the user agreed, the shifts of the following events
+  const proposedItems = useMemo(
+    () => (proposal ? [...proposal.items, ...(cascadeAccepted ? (proposal.cascade?.items ?? []) : [])] : []),
+    [proposal, cascadeAccepted],
+  );
+
   const handleAccept = async () => {
     if (!proposal) return;
     setSaving(true);
     try {
       await saveItems(
-        proposal.items.map((item) => (item.status === 'proposed' ? { ...item, status: 'confirmed' } : item)),
+        proposedItems.map((item) => (item.status === 'proposed' ? { ...item, status: 'confirmed' } : item)),
       );
       setProposal(null);
       setInput('');
@@ -84,10 +92,10 @@ export function HomeScreen() {
   // While the modal is open, the proposal for this day is previewed in the timeline
   const timelineItems = useMemo(() => {
     if (!proposal) return items;
-    const changedIds = new Set(proposal.items.map((item) => item.id));
-    const previews = proposal.items.filter((item) => occursOnDate(item, date));
+    const changedIds = new Set(proposedItems.map((item) => item.id));
+    const previews = proposedItems.filter((item) => occursOnDate(item, date));
     return [...items.filter((item) => !changedIds.has(item.id)), ...previews];
-  }, [items, proposal, date]);
+  }, [items, proposal, proposedItems, date]);
 
   const dateLabel = parseDateString(date).toLocaleDateString('it-IT', {
     weekday: 'long',
@@ -151,6 +159,9 @@ export function HomeScreen() {
         unscheduled={proposal?.unscheduled ?? []}
         changes={proposal?.changes ?? []}
         notice={proposal?.notice}
+        cascade={proposal?.cascade}
+        cascadeAccepted={cascadeAccepted}
+        onToggleCascade={() => setCascadeAccepted((accepted) => !accepted)}
         saving={saving}
         onAccept={handleAccept}
         onCancel={() => setProposal(null)}

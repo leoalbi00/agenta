@@ -1,8 +1,8 @@
-import { ArrowRightLeft, Clock, Info, Sparkles, TriangleAlert } from 'lucide-react-native';
+import { ArrowRightLeft, Clock, Info, Sparkles, Square, SquareCheck, TriangleAlert } from 'lucide-react-native';
 import { ActivityIndicator, Modal, Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import type { AgendaChange } from '../services/agenda';
+import type { AgendaChange, CascadeProposal } from '../services/agenda';
 import type { CalendarItem } from '../types';
 import { formatTimeWindow, getItemTimeRange } from '../utils/items';
 import { CATEGORY_LABELS } from '../utils/labels';
@@ -16,9 +16,13 @@ interface ApprovalModalProps {
   items: CalendarItem[];
   /** Flexible tasks the scheduler couldn't fit: they are not saved */
   unscheduled: CalendarItem[];
-  /** Changes to the existing agenda; when present they replace the list of items */
+  /** Changes to the existing agenda; the other items are shown as new */
   changes?: AgendaChange[];
   notice?: string;
+  /** Shifts of the following events, saved only if accepted */
+  cascade?: CascadeProposal;
+  cascadeAccepted?: boolean;
+  onToggleCascade?: () => void;
   saving?: boolean;
   onAccept: () => void;
   onCancel: () => void;
@@ -65,6 +69,8 @@ function describeChange({ kind, item, minutes }: AgendaChange): string {
   switch (kind) {
     case 'moved':
       return `Riorganizzazione agenda: ${item.title} spostato alle ${start}`;
+    case 'updated':
+      return `'${item.title}' è già in agenda: aggiornato a ${start} – ${range ? formatTimeOfDay(range.end) : ''} invece di crearne un duplicato`;
     case 'extended':
       return `${item.title} allungato di ${formatDuration(minutes ?? 0)}: ora ${start} – ${range ? formatTimeOfDay(range.end) : ''}`;
     case 'unscheduled':
@@ -72,6 +78,44 @@ function describeChange({ kind, item, minutes }: AgendaChange): string {
     case 'conflict':
       return `${item.title} è un evento fisso alle ${start}: non lo sposto automaticamente`;
   }
+}
+
+function CascadeBox({
+  cascade,
+  accepted,
+  onToggle,
+}: {
+  cascade: CascadeProposal;
+  accepted: boolean;
+  onToggle?: () => void;
+}) {
+  return (
+    <View className="mb-2 rounded-2xl border border-amber-300 bg-amber-50 p-3">
+      <View className="flex-row items-start gap-2">
+        <TriangleAlert color="#b45309" size={16} />
+        <Text className="flex-1 text-sm font-semibold text-amber-900">{cascade.message}</Text>
+      </View>
+      {cascade.changes.length > 1 && (
+        <View className="ml-6 mt-2">
+          <Text className="text-xs font-semibold uppercase text-amber-700">Di conseguenza</Text>
+          {cascade.changes.map((change) => (
+            <Text key={change.item.id} className="text-sm text-amber-900">
+              • {describeChange(change)}
+            </Text>
+          ))}
+        </View>
+      )}
+      <Pressable
+        onPress={onToggle}
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: accepted }}
+        className="mt-3 flex-row items-center gap-2 self-start rounded-xl bg-white px-3 py-2 active:bg-amber-100"
+      >
+        {accepted ? <SquareCheck color="#4f46e5" size={20} /> : <Square color="#94a3b8" size={20} />}
+        <Text className="text-sm font-semibold text-slate-800">Sì, sposta anche gli impegni successivi</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 function ChangeRow({ change }: { change: AgendaChange }) {
@@ -93,12 +137,17 @@ export function ApprovalModal({
   unscheduled,
   changes = [],
   notice,
+  cascade,
+  cascadeAccepted = false,
+  onToggleCascade,
   saving = false,
   onAccept,
   onCancel,
 }: ApprovalModalProps) {
   const insets = useSafeAreaInsets();
   const canAccept = items.length > 0 && !saving;
+  const changedIds = new Set(changes.map(({ item }) => item.id));
+  const newItems = items.filter((item) => !changedIds.has(item.id));
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
@@ -124,9 +173,13 @@ export function ApprovalModal({
                 <Text className="flex-1 text-sm text-slate-700">{notice}</Text>
               </View>
             )}
-            {changes.length
-              ? changes.map((change) => <ChangeRow key={`${change.kind}-${change.item.id}`} change={change} />)
-              : items.map((item) => <ProposalRow key={item.id} item={item} />)}
+            {changes.map((change) => (
+              <ChangeRow key={`${change.kind}-${change.item.id}`} change={change} />
+            ))}
+            {cascade && <CascadeBox cascade={cascade} accepted={cascadeAccepted} onToggle={onToggleCascade} />}
+            {newItems.map((item) => (
+              <ProposalRow key={item.id} item={item} />
+            ))}
 
             {unscheduled.length > 0 && (
               <View className="mb-2 rounded-2xl bg-amber-50 p-3">
