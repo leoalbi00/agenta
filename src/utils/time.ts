@@ -42,3 +42,28 @@ export function combineDateAndMinutes(dateString: string, minutes: number): stri
 export function minutesFromDayStart(isoDateTime: string, dateString: string): number {
   return Math.round((new Date(isoDateTime).getTime() - parseDateString(dateString).getTime()) / 60000);
 }
+
+/** ISO datetime -> "HH:mm" in local time */
+export function formatTimeOfDay(isoDateTime: string): string {
+  const date = new Date(isoDateTime);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** 90 -> "1 h 30 min" */
+export function formatDuration(totalMinutes: number): string {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (!hours) return `${minutes} min`;
+  return minutes ? `${hours} h ${minutes} min` : `${hours} h`;
+}
+
+/** "Oggi", "Domani", or e.g. "mer 21 ott" */
+export function formatDayLabel(dateString: string, today = toDateString(new Date())): string {
+  if (dateString === today) return 'Oggi';
+  if (dateString === addDays(today, 1)) return 'Domani';
+  return parseDateString(dateString).toLocaleDateString('it-IT', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  });
+}

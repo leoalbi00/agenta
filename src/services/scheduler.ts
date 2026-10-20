@@ -13,6 +13,8 @@ export interface SchedulerOptions {
   dayStart?: string;
   dayEnd?: string;
   intervalMinutes?: number;
+  /** "HH:mm": no task is placed before this time (e.g. now, when planning today) */
+  earliestStartTime?: string;
 }
 
 export interface FreeGap {
@@ -47,7 +49,7 @@ export function generateTimeSlots(dayStart = '08:00', dayEnd = '22:00', interval
 }
 
 /** Marks every slot overlapping [startMinutes, endMinutes) as occupied. */
-function markOccupied(slots: DailySlot[], startMinutes: number, endMinutes: number, itemId: string): void {
+function markOccupied(slots: DailySlot[], startMinutes: number, endMinutes: number, itemId?: string): void {
   for (const slot of slots) {
     if (timeToMinutes(slot.startTime) < endMinutes && timeToMinutes(slot.endTime) > startMinutes) {
       slot.isOccupied = true;
@@ -86,9 +88,12 @@ export function fitFlexibleTasks(
   existingItems: CalendarItem[],
   newTasks: CalendarItem[],
   dateString: string,
-  { dayStart = '08:00', dayEnd = '22:00', intervalMinutes = 15 }: SchedulerOptions = {},
+  { dayStart = '08:00', dayEnd = '22:00', intervalMinutes = 15, earliestStartTime }: SchedulerOptions = {},
 ): FitResult {
   const slots = generateTimeSlots(dayStart, dayEnd, intervalMinutes);
+  if (earliestStartTime) {
+    markOccupied(slots, 0, timeToMinutes(earliestStartTime));
+  }
   // Tasks being (re)scheduled must not block themselves
   const newTaskIds = new Set(newTasks.map((task) => task.id));
 
