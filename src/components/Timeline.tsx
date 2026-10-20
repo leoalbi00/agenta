@@ -1,4 +1,4 @@
-import { ScrollView, Text, View } from 'react-native';
+import { Pressable, ScrollView, Text, View } from 'react-native';
 
 import type { CalendarItem } from '../types';
 import { getItemTimeRange } from '../utils/items';
@@ -102,12 +102,17 @@ export function Timeline({ items, date, dayStart = '08:00', dayEnd = '22:00', on
           <Text className="mb-2 text-xs font-semibold uppercase text-slate-400">Da pianificare</Text>
           <View className="flex-row flex-wrap gap-2">
             {untimed.map((item) => (
-              <View key={item.id} className="rounded-full bg-violet-100 px-3 py-1">
+              <Pressable
+                key={item.id}
+                onPress={onItemPress && (() => onItemPress(item))}
+                disabled={!onItemPress}
+                className="rounded-full bg-violet-100 px-3 py-1 active:bg-violet-200"
+              >
                 <Text className="text-xs font-medium text-violet-800">
                   {item.title}
                   {item.estimatedMinutes ? ` · ${formatDuration(item.estimatedMinutes)}` : ''}
                 </Text>
-              </View>
+              </Pressable>
             ))}
           </View>
         </View>

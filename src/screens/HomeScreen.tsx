@@ -4,11 +4,12 @@ import { KeyboardAvoidingView, Platform, Pressable, Text, TextInput, type TextIn
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ApprovalModal } from '../components/ApprovalModal';
+import { ItemActionsModal } from '../components/ItemActionsModal';
 import { Timeline } from '../components/Timeline';
 import { type AgendaProposal, planInput } from '../services/agenda';
-import { getItemsByDate, saveItems, updateItemStatus } from '../services/storage';
+import { deleteItem, getItemsByDate, saveItems, updateItemStatus } from '../services/storage';
 import type { CalendarItem } from '../types';
-import { occursOnDate } from '../utils/items';
+import { getItemTimeRange, occursOnDate } from '../utils/items';
 import { parseDateString, toDateString } from '../utils/time';
 
 export function HomeScreen() {
@@ -18,6 +19,9 @@ export function HomeScreen() {
   const [proposal, setProposal] = useState<AgendaProposal | null>(null);
   const [saving, setSaving] = useState(false);
   const [cascadeAccepted, setCascadeAccepted] = useState(false);
+  // Item whose actions (complete, delete) are shown
+  const [selectedItem, setSelectedItem] = useState<CalendarItem | null>(null);
+  const [updatingItem, setUpdatingItem] = useState(false);
   // Shown above the input bar (Alert.alert does nothing on the web)
   const [message, setMessage] = useState<string | null>(null);
   const inputRef = useRef<TextInputInstance>(null);
@@ -75,14 +79,30 @@ export function HomeScreen() {
     }
   };
 
-  const handleItemPress = async (item: CalendarItem) => {
+  const updateSelectedItem = async (update: () => Promise<unknown>, errorMessage: string) => {
+    setUpdatingItem(true);
     try {
-      await updateItemStatus(item.id, item.status === 'completed' ? 'confirmed' : 'completed');
+      await update();
+      setSelectedItem(null);
       await loadItems();
     } catch {
-      setMessage("Impossibile aggiornare l'impegno.");
+      setMessage(errorMessage);
+    } finally {
+      setUpdatingItem(false);
     }
   };
+
+  const handleToggleCompleted = (item: CalendarItem) => {
+    // Back to "to do": confirmed if it has a time, otherwise still to plan
+    const reopenedStatus = getItemTimeRange(item) ? 'confirmed' : 'pending';
+    return updateSelectedItem(
+      () => updateItemStatus(item.id, item.status === 'completed' ? reopenedStatus : 'completed'),
+      "Impossibile aggiornare l'impegno.",
+    );
+  };
+
+  const handleDelete = (item: CalendarItem) =>
+    updateSelectedItem(() => deleteItem(item.id), "Impossibile eliminare l'impegno.");
 
   const handleMicPress = () => {
     inputRef.current?.focus();
@@ -111,7 +131,7 @@ export function HomeScreen() {
           <Text className="text-3xl font-bold text-slate-900">SmartAgenda</Text>
         </View>
 
-        <Timeline items={timelineItems} date={date} onItemPress={proposal ? undefined : handleItemPress} />
+        <Timeline items={timelineItems} date={date} onItemPress={proposal ? undefined : setSelectedItem} />
 
         {message && (
           <View className="mx-3 mb-2 flex-row items-start gap-2 rounded-2xl bg-amber-50 p-3">
@@ -151,6 +171,14 @@ export function HomeScreen() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <ItemActionsModal
+        item={selectedItem}
+        busy={updatingItem}
+        onToggleCompleted={handleToggleCompleted}
+        onDelete={handleDelete}
+        onClose={() => setSelectedItem(null)}
+      />
 
       <ApprovalModal
         visible={proposal !== null}
