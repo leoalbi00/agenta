@@ -1,35 +1,72 @@
 # Skill consigliate per agenta
 
-Ricerca fatta il 2026-11-17 con la skill `find-skills` (installata in `.claude/skills/find-skills`).
-Nota: `npx skills find` era bloccato dalla rete dell'ambiente cloud, quindi la ricerca è stata fatta sulle pagine di skills.sh. Prima di installare una skill, controlla installazioni, stelle e audit di sicurezza sulla sua pagina.
+Ricerca fatta il 2026-11-17 con `npx skills find` (skill `find-skills`, in `.claude/skills/find-skills`).
+Le installazioni sono quelle di skills.sh in quella data. Prima di installare, controlla la pagina su https://skills.sh/<owner>/<repo>/<skill>.
+
+> Negli ambienti cloud Claude, la CLI `skills` di Node non usa il proxy da sola. Lanciala con:
+> `NODE_USE_ENV_PROXY=1 NODE_EXTRA_CA_CERTS=/root/.ccr/ca-bundle.crt npx skills find <query>`
 
 ## Già installate
 | Skill | A cosa serve |
 |---|---|
-| `find-skills` (vercel-labs/skills) | Cercare e installare altre skill |
+| `vercel-labs/skills@find-skills` | Cercare e installare altre skill |
 | `graphify` | Grafo della conoscenza del repo (`graphify-out/`) |
 
-## Dominio: calendario / agenda
-| Skill | Perché | Install |
+## Consigliate subito (indipendenti dallo stack)
+| Skill | Installazioni | Perché |
 |---|---|---|
-| [google-calendar — odyssey4me/agent-skills](https://www.skills.sh/odyssey4me/agent-skills/google-calendar) | Eventi, disponibilità, slot liberi con Google Calendar | `npx skills add odyssey4me/agent-skills --skill google-calendar` |
-| [google-calendar — dotneet/claude-code-marketplace](https://www.skills.sh/dotneet/claude-code-marketplace/google-calendar) | Calendar + Google Tasks (OAuth desktop) | `npx skills add dotneet/claude-code-marketplace --skill google-calendar` |
-| [google-calendar — sanjay3290/ai-skills](https://www.skills.sh/sanjay3290/ai-skills/google-calendar) | CRUD eventi + free time (solo account Workspace) | `npx skills add sanjay3290/ai-skills --skill google-calendar` |
-| [googleworkspace/cli](https://www.skills.sh/googleworkspace/cli/recipe-find-free-time) | Ricette ufficiali: find-free-time, plan-weekly-schedule, calendar-insert, cancel-and-notify | `npx skills add googleworkspace/cli` |
-| [calendar-automation — claude-office-skills](https://www.skills.sh/claude-office-skills/skills/calendar-automation) | Automazioni di calendario | `npx skills add claude-office-skills/skills --skill calendar-automation` |
-| [syncfusion-react-scheduler](https://www.skills.sh/syncfusion/react-ui-components-skills/syncfusion-react-scheduler) | Se la UI usa il componente Scheduler Syncfusion (viste, ricorrenze) | `npx skills add syncfusion/react-ui-components-skills --skill syncfusion-react-scheduler` |
+| `anthropics/skills@frontend-design` | 1.1M | Interfaccia curata, non "generica" |
+| `nextlevelbuilder/ui-ux-pro-max-skill@ui-ux-pro-max` | 456K | Linee guida UI/UX (palette, tipografia, componenti) |
+| `anthropics/skills@webapp-testing` | 207K | Test dell'app web con Playwright |
 
-## Sviluppo app (stack probabile web/mobile)
-| Skill | Perché | Install |
+## Dominio: calendario, agenda, promemoria
+| Skill | Installazioni | Perché |
 |---|---|---|
-| [frontend-design — anthropics/skills](https://www.skills.sh/anthropics/skills) | UI curata (~1.1M installazioni) | `npx skills add anthropics/skills --skill frontend-design` |
-| vercel-react-best-practices — vercel-labs/agent-skills | Best practice React/Next.js | `npx skills add vercel-labs/agent-skills --skill vercel-react-best-practices` |
-| vercel-composition-patterns — vercel-labs/agent-skills | Pattern di composizione componenti (~458K) | `npx skills add vercel-labs/agent-skills --skill vercel-composition-patterns` |
-| vercel-react-native-skills — vercel-labs/agent-skills | Se agenta diventa app mobile (~280K) | `npx skills add vercel-labs/agent-skills --skill vercel-react-native-skills` |
-| supabase-postgres-best-practices — supabase/agent-skills | Backend/DB per eventi e utenti (~488K) | `npx skills add supabase/agent-skills --skill supabase-postgres-best-practices` |
+| `googleworkspace/cli@gws-calendar` | 64K | Integrazione ufficiale Google Calendar |
+| `googleworkspace/cli@gws-calendar-agenda` | 51.6K | Leggere l'agenda (eventi di oggi/settimana) |
+| `googleworkspace/cli@gws-calendar-insert` | 50.1K | Creare eventi con invitati e link Meet |
+| `caffeinelabs/skills@connector-googlecalendar` | 26.1K | Connettore Google Calendar alternativo |
+| `claude-office-skills/skills@calendar-automation` | 6.3K | Automazioni di calendario |
+| `anthropics/knowledge-work-plugins@task-management` | 7.4K | Gestione attività/to-do |
+| `odyssey4me/agent-skills@google-calendar` | 1.2K | Disponibilità e slot liberi (Python) |
 
-## Opzionali
-- [scheduler — jshchnz/claude-code-scheduler](https://www.skills.sh/jshchnz/claude-code-scheduler/scheduler): linguaggio naturale → cron. Utile come riferimento per il parsing di "ogni lunedì alle 9".
+Outlook, meeting scheduler, time blocking: solo skill con meno di 150 installazioni, da evitare per ora.
 
-## Da scartare
-- `content-calendar` (social media), `laravel-task-scheduling` (solo se il backend è Laravel), `xauusd-calendar-agent` (trading).
+## Se lo stack è Next.js / React (web)
+| Skill | Installazioni | Perché |
+|---|---|---|
+| `vercel-labs/agent-skills@vercel-react-best-practices` | 906K | Best practice React/Next.js |
+| `wshobson/agents@nextjs-app-router-patterns` | 34.2K | Pattern App Router |
+| `vercel/ai@ai-sdk` | 73.3K | Parte "intelligente": LLM, tool calling, streaming |
+| `clerk/skills@clerk-nextjs-patterns` | 56.3K | Solo se usate Clerk per il login |
+
+## Backend / database
+| Skill | Installazioni | Perché |
+|---|---|---|
+| `supabase/agent-skills@supabase-postgres-best-practices` | 488.6K | Schema e query Postgres su Supabase |
+| `supabase/agent-skills@supabase` | 367.9K | Auth, storage, realtime Supabase |
+| `prisma/skills@prisma-postgres` | 422.3K | Alternativa: Prisma + Postgres |
+| `neondatabase/agent-skills@neon-postgres` | 313.4K | Alternativa: Neon |
+
+Scegline uno solo, in base al backend.
+
+## Se agenta diventa app mobile
+| Skill | Installazioni | Perché |
+|---|---|---|
+| `vercel-labs/agent-skills@vercel-react-native-skills` | 279.9K | React Native |
+| `callstackincubator/agent-skills@react-native-best-practices` | 32.7K | Performance React Native |
+| `expo/skills@expo-dev-client`, `expo-deployment` | 76.6K / 40.2K | Se usate Expo |
+| `dpearson2699/swift-ios-skills@push-notifications` | 4.5K | Promemoria push (iOS nativo) |
+| `capawesome-team/skills@capacitor-push-notifications` | 1.6K | Promemoria push (Capacitor) |
+
+## Test
+| Skill | Installazioni | Perché |
+|---|---|---|
+| `microsoft/playwright-cli@playwright-cli` | 218.9K | Playwright ufficiale |
+| `currents-dev/playwright-best-practices-skill@playwright-best-practices` | 108K | Best practice test E2E |
+
+## Installazione
+```bash
+npx skills add anthropics/skills --skill frontend-design -a claude-code -y
+```
+Con `-a claude-code` la skill finisce in `.claude/skills/` del progetto e viene registrata in `skills-lock.json`.
