@@ -1,0 +1,50 @@
+{
+  "README.md": {
+    "mtime": 1794932583.9922068,
+    "seen": 1794932584.395343,
+    "ast_hash": "54c5d46f545f84633aee9f0693ff0b05",
+    "semantic_hash": ""
+  },
+  "assets/logo-wordmark.png": {
+    "mtime": 1794932473.8360395,
+    "seen": 1794932495.4348435,
+    "ast_hash": "ad5d1988524e6e0c0404b084db29fa41",
+    "semantic_hash": ""
+  },
+  "assets/logo-wordmark.svg": {
+    "mtime": 1794932473.4204926,
+    "seen": 1794932495.4348462,
+    "ast_hash": "3a85276644cc4ab6d04b8704229facb2",
+    "semantic_hash": ""
+  },
+  "assets/logo.png": {
+    "mtime": 1794932467.6160393,
+    "seen": 1794932495.4348476,
+    "ast_hash": "e14a09821e4e45596ca801a86ca2f766",
+    "semantic_hash": ""
+  },
+  "assets/logo.svg": {
+    "mtime": 1794932466.5398173,
+    "seen": 1794932495.4348488,
+    "ast_hash": "acfd3270792680fccba016b80df50ae9",
+    "semantic_hash": ""
+  },
+  "skills-lock.json": {
+    "mtime": 1794932510.6800954,
+    "seen": 1794932584.3953319,
+    "ast_hash": "deafd84ce1ef8a142d7f2a46802b4a2a",
+    "semantic_hash": ""
+  },
+  ".claude/skills/find-skills/SKILL.md": {
+    "mtime": 1794932510.6783326,
+    "seen": 1794932584.395339,
+    "ast_hash": "62b297abdee9aea84c577ab2e04e1974",
+    "semantic_hash": ""
+  },
+  "docs/skill-consigliate.md": {
+    "mtime": 1794932583.9880435,
+    "seen": 1794932584.3953452,
+    "ast_hash": "e3eb9ed50231a8374887add17b9440fd",
+    "semantic_hash": ""
+  }
+}
