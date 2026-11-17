@@ -7,6 +7,41 @@
       "sourceType": "github",
       "skillPath": "skills/find-skills/SKILL.md",
       "computedHash": "7bc223e2aafbdbf6e50ea243ba6ef67fe432bb069ab439fea0390795dac0bf7f"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "commit": "e4bb5d960d87126ff3b3a8af1a104b7db67560ba",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "83485963700bcf11d5bf78118facb301676b69d918fee2e45a95e7f1a2840f6c"
+    },
+    "gws-calendar": {
+      "source": "googleworkspace/cli",
+      "commit": "cd3697e07eb520056dcf142d0c7439bbb9ba32e9",
+      "sourceType": "github",
+      "skillPath": "skills/gws-calendar/SKILL.md",
+      "computedHash": "d429bcd005436a8eafbd6c6634d60fb3e51a3c66457c1c00e8c695420fdee0c9"
+    },
+    "gws-calendar-agenda": {
+      "source": "googleworkspace/cli",
+      "commit": "cd3697e07eb520056dcf142d0c7439bbb9ba32e9",
+      "sourceType": "github",
+      "skillPath": "skills/gws-calendar-agenda/SKILL.md",
+      "computedHash": "fc8c836e54f12b7a2a4fe8e087b8822c2f4c1909c451f078bcda92a2bdf77d2c"
+    },
+    "gws-calendar-insert": {
+      "source": "googleworkspace/cli",
+      "commit": "cd3697e07eb520056dcf142d0c7439bbb9ba32e9",
+      "sourceType": "github",
+      "skillPath": "skills/gws-calendar-insert/SKILL.md",
+      "computedHash": "cfd159599d528957961b0de43e69eb5eb8e84dd2aeb3fcd95d0f8147829ae5ca"
+    },
+    "gws-shared": {
+      "source": "googleworkspace/cli",
+      "commit": "cd3697e07eb520056dcf142d0c7439bbb9ba32e9",
+      "sourceType": "github",
+      "skillPath": "skills/gws-shared/SKILL.md",
+      "computedHash": "0aa572df2db7cbc6fc6beff4e00e216d4361cae7821c45d12202031852f9c7a4"
     }
   }
 }

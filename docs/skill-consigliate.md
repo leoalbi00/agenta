@@ -11,6 +11,8 @@ Le installazioni sono quelle di skills.sh in quella data. Prima di installare, c
 |---|---|
 | `vercel-labs/skills@find-skills` | Cercare e installare altre skill |
 | `graphify` | Grafo della conoscenza del repo (`graphify-out/`) |
+| `anthropics/skills@frontend-design` | Design dell'interfaccia |
+| `googleworkspace/cli@gws-calendar`, `gws-calendar-agenda`, `gws-calendar-insert`, `gws-shared` | Google Calendar tramite il programma `gws` (`npm i -g @googleworkspace/cli`, poi `gws auth login`) |
 
 ## Consigliate subito (indipendenti dallo stack)
 | Skill | Installazioni | Perché |
